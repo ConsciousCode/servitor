@@ -4,12 +4,44 @@ natural language with programmatic logic, including parsing, error recovery,
 and session maintenance.
 '''
 
-from typing import Protocol, Callable, Generator, Any, NamedTuple
+from typing import Protocol, Callable, Generator, Any, NamedTuple, Optional, get_origin, get_args, get_type_hints, Union, Literal
+import types
 import inspect
 import re
 import hjson
 
 from .util import Registry, default, build_task
+
+def typename(cls) -> str:
+	'''Convert an annotation into a typename string for the LLM.'''
+	
+	origin = get_origin(cls)
+	if isinstance(cls, types.GenericAlias):
+		return str(cls)
+	elif origin is Union:
+		args = get_args(cls)
+		if types.NoneType in args:
+			rest = [typename(t) for t in args if t is not types.NoneType]
+			base = rest[0] if len(rest) == 1 else f'({"|".join(rest)})'
+			return f"{base}?"
+		return "|".join(typename(t) for t in args)
+	elif origin is Literal:
+		return repr(get_args(cls)[0])
+	elif cls is Any:
+		return "any"
+	elif hints := get_type_hints(cls):
+		fields = []
+		for field, ft in hints.items():
+			fields.append(field if ft is Any else f"{field}: {typename(ft)}")
+		return f"{{{', '.join(fields)}}}"
+	elif isinstance(cls, type):
+		return cls.__name__
+	elif isinstance(cls, str):
+		return cls
+	elif cls is ...:
+		return "..."
+	else:
+		return repr(cls)
 
 def build_signature(origin: Callable):
 	'''Build a typed function signature for a given function.'''
@@ -20,11 +52,11 @@ def build_signature(origin: Callable):
 		if param.annotation is inspect.Parameter.empty:
 			params.append(name)
 		else:
-			params.append(f"{name}: {param.annotation}")
+			params.append(f"{name}: {typename(param.annotation)}")
 	
 	fndef = f"{origin.__name__ or ''}({', '.join(params)})"
 	if sig.return_annotation is not inspect.Signature.empty:
-		fndef += f" -> {sig.return_annotation}"
+		fndef += f" -> {typename(sig.return_annotation)}"
 	
 	return fndef
 
@@ -83,7 +115,7 @@ class PlainAdapter(Adapter):
 		'''Adds dedent preprocessing to format.'''
 		
 		if m := re.match(r"""^(\s+)|^\S.*\n(\s+)""", text):
-			text = re.sub(rf"^{m[m.lastindex]}", "", text, re.M)
+			text = re.sub(rf"^{m[m.lastindex]}", "", text, flags=re.M)
 		
 		return text.format(*args, **kwargs)
 	
@@ -145,7 +177,7 @@ class TypeAdapter(PlainAdapter):
 				"kwargs": kwargs
 			}
 		
-		return hjson.dumps(prompt)
+		return hjson.dumps(prompt, indent='\t')
 	
 	def parse(self, origin, res):
 		'''Parse using HJSON and validate with the return value annotation.'''

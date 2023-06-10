@@ -79,7 +79,9 @@ class Kernel:
 				task = adapter(origin, *args, **kwargs)
 				prompt = next(task)
 				while prompt:
+					print(prompt)
 					prompt = task.send(await self.connector(prompt, **conf))
+					print("---")
 			except StopIteration as e:
 				return e.value
 		
