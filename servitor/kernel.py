@@ -91,6 +91,7 @@ class Kernel:
 			origin_class = origin
 			origin = origin.__call__ # Assign so semantic_fn can see it
 			origin_class.__call__ = wraps(origin)(semantic_fn)
+			origin_class.__name__ = f"{origin_class.__name__}.__call__"
 			return origin_class
 		
 		if callable(origin):

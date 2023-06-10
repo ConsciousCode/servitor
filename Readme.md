@@ -4,7 +4,7 @@ Easily create "semantic functions" which use LLMs as a black box to execute the 
 ```python
 >>> @semantic
 ... def list_people(text) -> list[str]:
-...	 """List people mentioned in the given text."""
+...     """List people mentioned in the given text."""
 ...
 >>> await list_people("John and Mary went to the store.")
 ["John", "Mary"]
@@ -86,45 +86,62 @@ All kernels are in `kernel.py`. Only two are defined:
 * `Kernel` - Simple base class for kernels.
 * `DefaultKernel` - Kernel implementation loading defaults from config files and ENV. It has an instance `semantic` for ease-of-use.
 
+Kernels can be called, used as decorators (with optional arguments), or they can do an ordinary completion using `Adapter.complete`
+
 ## Examples
+You can use the `semantic` singleton to define a semantic function:
 ```python
 >>> @semantic
 ... def list_people(text) -> list[str]:
-...	    """List people mentioned in the given text."""
+...     """List people mentioned in the given text."""
 ...
 >>> asyncio.run(list_people("John and Mary went to the store."))
 ["John", "Mary"]
 ```
 
+You can customize the prompt by returning a string from the function:
 ```python
 >>> @semantic
 ... def classify_valence(text: str) -> float:
-...	    return """Classify the valence of the given text as a value between -1 and 1."""
+...     return """Classify the valence of the given text as a value between -1 and 1."""
 ...
 >>> asyncio.run(classify_valence("I am happy."))
 0.9
 ```
 
+The kernel decorator can be used on classes, wrapping the `__call__` method.
+```python
+>>> @semantic
+... class SelectTool:
+...     def __init__(self, tools: list[Callable]):
+...         self.tools = tools
+...
+...     def __call__(self, task: str) -> str:
+...         """Select a tool from the given list."""
+...         return f"Select a tool for the given task from this list: {list(self.tools.keys())}"
+```
+
+Plain adapter is good for simple text to text tasks:
 ```python
 >>> @semantic(adapter="plain")
 ... def summarize(text) -> str:
-...	    """Summarize the given text in two sentences or less."""
+...     """Summarize the given text in two sentences or less."""
 ```
 
 Dumber models can be used for dumber tasks:
 ```python
 >>> @semantic(model="text-ada-002", adapter="none")
 ... def what_is_this(text):
-...	    return f"{text}\n\nWhat is this?"
+...     return f"{text}\n\nWhat is this?"
 ...
->>> summarize("lorem ipsum...")
+>>> what_is_this("lorem ipsum...")
 OpenAICompletion(...)
 >>> asyncio.run(_)
 "This is an example of placeholder Latin text, commonly known as Lorem Ipsum."
 ```
 
-## What's the Point?
-I've noticed a trend of people using LLMs as semi-personified agents. They're given personalities, are presented with tools to select from and plan with (eg Microsoft Semantic Kernels), and generally expected to act like some kind of proto-person. This is understandable given the first truly usable instance we saw was ChatGPT, a chatbot with a very simple cognitive architecture (rolling, discrete turn-based chat logs with an initial system prompt), however it severely limits the usability and composability that's possible. This library is intended to reframe LLMs as what they are - very good stochastic models of language - and thus treat them as a kind of natural language inference engine, which is what they're really designed for. By reifying tasks as discrete functions which can be composed with ordinary logic, programs can be given a sort of embedded intelligence which is otherwise impossible.
+## What's the point?
+I've noticed a trend of people using LLMs as semi-personified agents. They're given personalities, presented with tools to select from and plan with (eg Microsoft Semantic Kernels), and generally expected to act like some kind of proto-person. This is understandable given the first truly usable instance we saw was ChatGPT, a chatbot with a very simple cognitive architecture (rolling, discrete, turn-based chat logs with an initial system prompt), however it severely limits the usability and composability that's possible. This library is intended to reframe LLMs as what they are - very good stochastic models of language - and thus treat them as a kind of natural language inference engine, which is what they're really designed for. By reifying tasks as discrete functions which can be composed with ordinary logic, programs can be given a sort of embedded intelligence which is otherwise impossible.
 
 ## What is a "servitor"?
 "Servitor" is a kind of artificial spirit in [chaos magick](https://en.wikipedia.org/wiki/Chaos_magic). Essentially, you create a miniature proto-consciousness which is given a specific task to perform autonomously. This might be something as simple as reminding you to wake up at a certain time, or as complex as performing a ritual on the "astral plane" on your behalf. Whether or not you believe in all that, the parallels are clear: It's a kind of AI program within your own mind which completes exactly one very specific task given to it in natural language. LLMs are more general than servitors, but restricting their capacities allows them to excel at what they're best at rather than trying to meet a standard they're not yet capable of. It's my opinion that AGI will not be a single monolithic LLM, but rather a cognitive architecture system which uses LLMs as computational units. Think of the cognitive architecture as the [Chinese Room](https://en.wikipedia.org/wiki/Chinese_room) and the LLMs as the person inside. Neither understands Chinese, but the total system does.
