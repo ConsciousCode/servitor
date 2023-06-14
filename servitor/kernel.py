@@ -10,7 +10,7 @@ from typing import Optional, Callable
 import inspect
 import asyncio
 
-from .util import default
+from .util import default, logger
 from .adapter import Adapter, TypeAdapter
 from .complete import Connector, Completion
 
@@ -106,11 +106,12 @@ class Kernel:
 			adapter: Adapter to use for this function.
 		'''
 		
-		adapter = default(adapter, lambda: self.adapter)
+		adapter = Adapter.registry.find(default(adapter, lambda: self.adapter))
 		config = default(config, kwargs)
-		
-		adapter = Adapter.registry.find(adapter)
 		sync_origin = force_sync(origin)
+		
+		name = ("async " if inspect.iscoroutinefunction(origin) else "") + origin.__name__
+		logger.debug(f"Building semantic function {name} with adapter {adapter.adapter_name} and {config=}")
 		
 		async def semantic_fn(*args, **kwargs):
 			'''Semantic function closure.'''
@@ -162,7 +163,7 @@ class DefaultKernel(Kernel):
 		else:
 			raise RuntimeError("No LLM provider configured.")
 		
-		return dict(
+		config = dict(
 			temperature=float(os.getenv("TEMPERATURE", 0)),
 			max_tokens=int(os.getenv("MAX_TOKENS", 1000)),
 			top_p=float(os.getenv("TOP_P", 0.9)),
@@ -178,6 +179,8 @@ class DefaultKernel(Kernel):
 			provider=provider,
 			organization=organization
 		)
+		logger.debug(f"Loaded configuration: {config}")
+		return config
 	
 	@cached_property
 	def connector(self):

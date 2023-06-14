@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import AsyncIterator, Iterator, Optional, NamedTuple
 import asyncio
 import time
-from .util import Registry
+from .util import Registry, logger
 
 class Delta(NamedTuple):
 	text: str
@@ -62,6 +62,7 @@ class Connector(ABC):
 	@staticmethod
 	def register(name):
 		def	decorator(cls):
+			logger.debug(f"Registering connector {cls.__name__} as {name!r}")
 			Connector.registry.register(name, cls.supports)
 			return cls
 		return decorator

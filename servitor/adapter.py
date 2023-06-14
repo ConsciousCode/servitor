@@ -10,7 +10,7 @@ import inspect
 import re
 import hjson
 
-from .util import Registry, default, build_task
+from .util import Registry, default, build_task, logger
 
 def typename(cls) -> str:
 	'''Convert an annotation into a typename string for the LLM.'''
@@ -72,6 +72,7 @@ class Adapter(Protocol):
 	@staticmethod
 	def register(name):
 		def decorator(cls):
+			logger.debug(f"Registering adapter {cls.__name__} as {name}")
 			cls.adapter_name = name
 			Adapter.registry.register(name, cls.supports)
 			return cls
@@ -87,7 +88,9 @@ class TaskAdapter(Adapter):
 	'''Do-nothing adapter.'''
 	
 	def __call__(self, origin, *args, **kwargs):
-		res = yield build_task(origin, args, kwargs)
+		task = build_task(origin, args, kwargs)
+		logger.debug(f"TaskAdapter called with {task}\n{args=}\n{kwargs=}")
+		res = yield task
 		return res
 
 @Adapter.register("plain")
@@ -104,11 +107,14 @@ class PlainAdapter(Adapter):
 		'''Build a task, prompt the LLM, parse the response, and fix any mistakes.'''
 		
 		task = self.task(origin, args, kwargs)
-		res = yield self.prompt(origin, task, args, kwargs)
+		prompt = self.prompt(origin, task, args, kwargs)
+		logger.debug(f"{type(self).__name__} prompt:\n{prompt}")
+		res = yield prompt
 		for _ in range(self.retry):
 			try:
 				return self.parse(origin, res)
 			except Exception as e:
+				logger.debug(f"Failed to parse response: {e}\nResponse: {res}")
 				res = yield self.fix(task, res, e)
 	
 	def format(self, text, *args, **kwargs):

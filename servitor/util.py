@@ -4,7 +4,11 @@ Common utilities.
 
 from typing import TypeVar, Optional, Callable
 import inspect
-import asyncio
+import logging
+import os
+
+logger = logging.getLogger("servitor")
+logger.setLevel(os.getenv("LOG_LEVEL", "WARNING").upper())
 
 T = TypeVar("T")
 def default(x: Optional[T], y: T|Callable[[], T]) -> T:
