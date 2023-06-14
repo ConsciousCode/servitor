@@ -30,7 +30,7 @@ class Completion(ABC):
 		'''Wait for the completion to finish.'''
 		pass
 
-class Connector:
+class Connector(ABC):
 	'''Generic connector for a language model endpoint.'''
 	
 	models: list[str]
@@ -69,13 +69,13 @@ class Connector:
 	@classmethod
 	def supports(cls, connector):
 		if connector in cls.models:
-			return cls
+			return cls()
 
+Connector.register("openai")
 class _openai_loader:
+	'''Load openai connectors when they're actually requested.'''
 	@staticmethod
 	def supports(key):
-		'''Load openai connectors when they're actually requested.'''
-		
 		OPEN_AI_MODELS = [
 			"text-curie-001", "text-babbage-001", "text-ada-001",
 			"text-davinci-002", "text-davinci-003",
@@ -88,5 +88,3 @@ class _openai_loader:
 		if key in OPEN_AI_MODELS:
 			from .openai import OpenAIConnector
 			return OpenAIConnector
-
-Connector.register("openai")(_openai_loader)

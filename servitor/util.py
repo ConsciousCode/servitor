@@ -4,7 +4,7 @@ Common utilities.
 
 from typing import TypeVar, Optional, Callable
 import inspect
-from functools import wraps
+import asyncio
 
 T = TypeVar("T")
 def default(x: Optional[T], y: T|Callable[[], T]) -> T:
@@ -38,10 +38,13 @@ class Registry:
 		self.registry = {}
 	
 	def find(self, key):
-		for k, supports in self.registry.items():
-			if x := supports(key):
-				return x
-		raise KeyError(key)
+		if isinstance(key, str):
+			for k, supports in self.registry.items():
+				if x := supports(key):
+					return x
+			raise KeyError(key)
+		else:
+			return key
 	
 	def register(self, name, supports):
 		self.registry[name] = supports

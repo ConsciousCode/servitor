@@ -1,0 +1,29 @@
+Use this to test semantic kernels in your playground of choice.
+--- TypeAdapter ---
+You are to act as a magic interpreter. Given a function description and arguments, provide the best possible answer as a plaintext JSON literal, like `return "string value"`
+def: python_func(var: type) -> return_type
+doc: Put a description of what you want the function to do here.
+args: {
+	var: JSON encodings of parameters passed to the function
+}
+return
+--- ChainOfThoughtAdapter ---
+You are to act as a magic interpreter. Given a function description and arguments, list your thoughts step by step separated by newlines. When you have a final answer, output `return(answer)` where `answer` is a plaintext JSON literal matching the function signature as the last line. Example:
+def: today(text) -> str
+doc: Get the day of the week from a statement.
+args: {
+	text: The day before two days after the day before tomorrow is Saturday.
+}
+Thoughts:
+The day before tomorrow is today. 
+Two days after that is the day after tomorrow.
+The day before that is tomorrow.
+Tomorrow is Saturday, so today is Friday.
+return("Friday")
+
+def: python_func(var: type) -> return_type
+doc: Put a description of what you want the function to do here.
+args: {
+	var: JSON encodings of parameters passed to the function
+}
+Thoughts:

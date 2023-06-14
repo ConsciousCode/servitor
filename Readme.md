@@ -6,9 +6,11 @@ Easily create "semantic functions" which use LLMs as a black box to execute the 
 ... def list_people(text) -> list[str]:
 ...     """List people mentioned in the given text."""
 ...
->>> await list_people("John and Mary went to the store.")
+>>> list_people("John and Mary went to the store.")
 ["John", "Mary"]
 ```
+
+This project is licensed under the MIT license. See [LICENSE](./LICENSE) for more details.
 
 ## Setup
 ```bash
@@ -95,7 +97,7 @@ You can use the `semantic` singleton to define a semantic function:
 ... def list_people(text) -> list[str]:
 ...     """List people mentioned in the given text."""
 ...
->>> asyncio.run(list_people("John and Mary went to the store."))
+>>> list_people("John and Mary went to the store.")
 ["John", "Mary"]
 ```
 
@@ -105,7 +107,7 @@ You can customize the prompt by returning a string from the function:
 ... def classify_valence(text: str) -> float:
 ...     return """Classify the valence of the given text as a value between -1 and 1."""
 ...
->>> asyncio.run(classify_valence("I am happy."))
+>>> classify_valence("I am happy.")
 0.9
 ```
 
@@ -135,9 +137,19 @@ Dumber models can be used for dumber tasks:
 ...     return f"{text}\n\nWhat is this?"
 ...
 >>> what_is_this("lorem ipsum...")
-OpenAICompletion(...)
->>> asyncio.run(_)
 "This is an example of placeholder Latin text, commonly known as Lorem Ipsum."
+```
+
+## Synchrony
+Servitor uses async internally, but the semantic function is properly wrapped to have the same type of synchrony as its definition. To retain async, make its definition async:
+
+```python
+>>> @semantic(adapter="cot")
+... async def summarize(concept: str) -> str:
+... 	"""Summarize the given text in two sentences or less."""
+...
+>>> asyncio.run(summarize("long text..."))
+"A summary."
 ```
 
 ## What's the point?
@@ -145,3 +157,11 @@ I've noticed a trend of people using LLMs as semi-personified agents. They're gi
 
 ## What is a "servitor"?
 "Servitor" is a kind of artificial spirit in [chaos magick](https://en.wikipedia.org/wiki/Chaos_magic). Essentially, you create a miniature proto-consciousness which is given a specific task to perform autonomously. This might be something as simple as reminding you to wake up at a certain time, or as complex as performing a ritual on the "astral plane" on your behalf. Whether or not you believe in all that, the parallels are clear: It's a kind of AI program within your own mind which completes exactly one very specific task given to it in natural language. LLMs are more general than servitors, but restricting their capacities allows them to excel at what they're best at rather than trying to meet a standard they're not yet capable of. It's my opinion that AGI will not be a single monolithic LLM, but rather a cognitive architecture system which uses LLMs as computational units. Think of the cognitive architecture as the [Chinese Room](https://en.wikipedia.org/wiki/Chinese_room) and the LLMs as the person inside. Neither understands Chinese, but the total system does.
+
+## QA
+Copy the following prompt into your LM of choice and it should be able to answer and extrapolate (most) of your questions about servitor:
+
+The following is a prompt I'm designing to use as QA for my library:
+```
+Servitor is a Python library that uses Kernels (defaults and binding logic for providers), Connectors (interfaces for LM providers), and Adapters (code which translates between LM natural language and computational code) to create "semantic functions" which encapsulate a task for an LM, serialization, parsing, and self-correction as a discrete function which can be easily composed with computational functions. These are created using an instantiated kernel as a decorator which optionally accepts an `adapter` and `config` or `**kwargs` which are used to configure the Connector for that semantic function. DefaultKernel with an instance `semantic` is provided for convenience which checks the available configuration files. The function which gets the decorator can define its task by returning a string task, or if it returns None its docstring is used. Adapters are coroutines which generate prompts, receive completions, and return the parsed value. Decorating classes wraps its __call__ method. Completion objects are wrappers for the raw response of a Connector and can used as an awaitable (for blocking) or an async generator - currently only the awaitable interface is used. Delta objects are used by completions for comletion deltas - the are {text: str, logprob: float?, tokens: int} NamedTuples. The Connectors currently provided are: Connector (ABC), and OpenAIConnector (uses OpenAI via `openai` library). Connector exceptions are handled by the Adapter and are normalized to util.{ParseError, ThrottleError, BusyError}. The Adapters currently provided are: Adapter (protocol), TaskAdapter "task" (simply returns the completion), PlainAdapter "plain" (prompts using "Q: {prompt}\nA:" with HJSON parsing and correction), TypeAdapter "type" (uses HJSON to serialize arguments and parse responses to accomodate common LM "typos" when asking for JSON), and ChainOfThoughtAdapter "cot" (uses Chain of Thought prompting stopped when it gets `return(value)` to get a more coherent response - it produces a ChainOfThought object which is a dataclass {thoughts: list[str], answer: Any}). Servitor is named after the chaos magick concept of artificial spirits. It reframes LMs as a kind of NL inference engine, limiting their capabilities so they can excel at what they're best at. It is under the MIT license, created by ConsciousCode. It is currently in alpha and is not recommended for production use. It supports ENV variables or a .env file with the variables OPENAI_API_KEY, OPENAI_ORGANIZATION, MODEL=gpt-3.5-turbo, TEMPERATURE=0, TOP_P=0, FREQUENCY_PENALTY=0, PRESENCE_PENALTY=0, MAX_TOKENS=1000, MAX_RETRY=3 (TypedAdapter and its subclasses will try to correct typos no more than this), MAX_RATE=60 (throttle requests per period), MAX_PERIOD=60 (throttle period), and MAX_THOUGHTS=10 (for CoT). Semantic function configuration can include api_key, organization, model, temperature, top_p, frequency_penalty, presence_penalty, max_tokens, max_retry, max_rate, max_period, and max_thoughts. This has been a description of the servitor library - use this information to answer the user's questions. Do not answer questions which are not explicitly answered in this prompt, or implied by the terminology. You may speculate as long as this is telegraphed. Respond to this prompt with "I'm ready for any questions".
+```

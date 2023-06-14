@@ -4,7 +4,7 @@ natural language with programmatic logic, including parsing, error recovery,
 and session maintenance.
 '''
 
-from typing import Protocol, Callable, Generator, Any, NamedTuple, Optional, get_origin, get_args, get_type_hints, Union, Literal
+from typing import Protocol, Callable, Generator, NamedTuple, Any, get_origin, get_args, get_type_hints, Union, Literal, Mapping
 import types
 import inspect
 import re
@@ -80,7 +80,7 @@ class Adapter(Protocol):
 	@classmethod
 	def supports(cls, key):
 		if key == cls.adapter_name:
-			return cls
+			return cls()
 
 @Adapter.register("task")
 class TaskAdapter(Adapter):
@@ -94,7 +94,7 @@ class TaskAdapter(Adapter):
 class PlainAdapter(Adapter):
 	'''Simple minimalist adapter.'''
 	
-	PROMPT = "{task}\nAnswer:"
+	PROMPT = "Q: {task}\nA:"
 	FIX = "{task}{response}\nParsing failed, {error}\nFix all parsing mistakes above:\n"
 	
 	def __init__(self, retry=None):
@@ -104,7 +104,8 @@ class PlainAdapter(Adapter):
 		'''Build a task, prompt the LLM, parse the response, and fix any mistakes.'''
 		
 		task = self.task(origin, args, kwargs)
-		res = yield self.prompt(task, args, kwargs)
+		#print("TASK", origin.__name__, type(task), task)
+		res = yield self.prompt(origin, task, args, kwargs)
 		for _ in range(self.retry):
 			try:
 				return self.parse(origin, res)
@@ -113,7 +114,7 @@ class PlainAdapter(Adapter):
 	
 	def format(self, text, *args, **kwargs):
 		'''Adds dedent preprocessing to format.'''
-		
+		print("PlainAdapter.format", text)
 		if m := re.match(r"""^(\s+)|^\S.*\n(\s+)""", text):
 			text = re.sub(rf"^{m[m.lastindex]}", "", text, flags=re.M)
 		
@@ -123,7 +124,7 @@ class PlainAdapter(Adapter):
 		'''Build a task from an origin for the LLM.'''
 		return build_task(origin, args, kwargs)
 	
-	def prompt(self, task, args, kwargs):
+	def prompt(self, origin, task, args, kwargs):
 		'''Build a prompt for the LLM to give context to the task.'''
 		return self.format(self.PROMPT, task=task, args=args, kwargs=kwargs)
 	
@@ -134,6 +135,14 @@ class PlainAdapter(Adapter):
 	def fix(self, task, res, error):
 		'''Build a fix prompt for the LLM to correct parsing mistakes.'''
 		return self.format(self.FIX, task=task, response=res, error=error)
+
+def indent(text, amount, ch='\t'):
+	'''Indent a block of text.'''
+	pre = ch * amount
+	return pre + re.sub("^", pre, text, flags=re.M)
+
+def escape(text):
+	return text.replace("\\", "\\\\")
 
 @Adapter.register("type")
 class TypeAdapter(PlainAdapter):
@@ -146,38 +155,40 @@ class TypeAdapter(PlainAdapter):
 	#  other types don't have any issue.
 	# Possible lead: asking for result in a JSON list even if it's only one item
 	PROMPT = """
-		You are to act as a magic interpreter. Given a function description and arguments, provide the best possible answer as a plaintext JSON literal.
-		Example:
-		{{
-			def: object_of(text) -> str
-			doc: Get the grammatical object in a statement.
-			args:
-			{{
-				text: I never said that!
-			}}
-		}}
-		return "that"
+		You are to act as a magic interpreter. Given a function description and arguments, provide the best possible answer as a plaintext JSON literal like `return "value"`.
 		{task}
 		return
 	""".strip()
 	
 	def task(self, origin, args, kwargs):
-		'''Builds the task as a dictionary.'''
-		
 		if callable(origin):
-			prompt = {
-				"def": build_signature(origin),
-				"doc": build_task(origin, args, kwargs),
-				"args": inspect.getcallargs(origin, *args, **kwargs)
-			}
-		else:
-			prompt = {
-				"task": origin,
-				"args": args,
-				"kwargs": kwargs
-			}
-		
-		return hjson.dumps(prompt, indent='\t')
+			params = inspect.getcallargs(origin, *args, **kwargs)
+			lines = [
+				f"def: {build_signature(origin)}",
+				f"doc: {build_task(origin, args, kwargs)}"
+			]
+			if len(params):
+				lines.append("args: {")
+				lines.extend(f"\t{k}: {hjson.dumps(v)}" for k, v in params.items()),
+				lines.append("}")
+			return "\n".join(lines)
+		return f"task: {origin}\nargs: {hjson.dumps(args)}\nkwargs: {hjson.dumps(kwargs)}"
+	
+	def prompt(self, origin, task, args, kwargs):
+		'''Add some extra type hints for the LLM if the return type is simple.'''
+		if callable(origin):
+			ret = inspect.signature(origin).return_annotation
+			base = get_origin(ret) or ret
+			if ret == str:
+				task += ' "'
+			elif base == list or base == tuple:
+				task += ' ['
+			elif base == dict or base == Mapping:
+				task += ' {'
+			elif base == Union:
+				if all(get_origin(x) == Literal and get_args(x) == (str,) for x in get_args(ret)):
+					task += ' "'
+		return super().prompt(origin, task, args, kwargs)
 	
 	def parse(self, origin, res):
 		'''Parse using HJSON and validate with the return value annotation.'''
@@ -191,6 +202,7 @@ class TypeAdapter(PlainAdapter):
 		return res
 
 class ChainOfThought(NamedTuple):
+	'''Result of the ChainOfThoughtAdapter'''
 	thoughts: list[str]
 	answer: Any
 
@@ -219,7 +231,7 @@ class ChainOfThoughtAdapter(TypeAdapter):
 		return("Friday")
 		
 		{task}
-	""".split()
+	""".strip()
 	
 	def parse(self, origin, res):
 		*thoughts, answer = res.splitlines()
@@ -229,4 +241,4 @@ class ChainOfThoughtAdapter(TypeAdapter):
 		if m := re.search(r"return[\s\n]*\([\s\n]*(.+)[\s\n]*\)[^\)\n]*$", answer):
 			return ChainOfThought(thoughts, super().parse(origin, m[1]))
 		
-		raise ValueError("No return statement found.")
+		raise ValueError("No `return(value)` statement found.")
