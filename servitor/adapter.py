@@ -104,7 +104,6 @@ class PlainAdapter(Adapter):
 		'''Build a task, prompt the LLM, parse the response, and fix any mistakes.'''
 		
 		task = self.task(origin, args, kwargs)
-		#print("TASK", origin.__name__, type(task), task)
 		res = yield self.prompt(origin, task, args, kwargs)
 		for _ in range(self.retry):
 			try:
@@ -114,7 +113,6 @@ class PlainAdapter(Adapter):
 	
 	def format(self, text, *args, **kwargs):
 		'''Adds dedent preprocessing to format.'''
-		print("PlainAdapter.format", text)
 		if m := re.match(r"""^(\s+)|^\S.*\n(\s+)""", text):
 			text = re.sub(rf"^{m[m.lastindex]}", "", text, flags=re.M)
 		
@@ -213,15 +211,11 @@ class ChainOfThoughtAdapter(TypeAdapter):
 	'''
 	
 	PROMPT = """
-		You are to act as a magic interpreter. Given a function description and arguments, list your thoughts step by step separated by newlines. When you have a final answer, output `return(answer)` where `answer` is a plaintext JSON literal matching the function signature as the last line.
-		Example:
-		{{
-			def: today(text) -> str
-			doc: Get the day of the week from a statement.
-			args:
-			{{
-				text: The day before two days after the day before tomorrow is Saturday.
-			}}
+		You are to act as a magic interpreter. Given a function description and arguments, list your thoughts step by step separated by newlines. When you have a final answer, output `return(answer)` where `answer` is a plaintext JSON literal matching the function signature as the last line. Example:
+		def: today(text) -> str
+		doc: Get the day of the week from a statement.
+		args: {{
+			text: The day before two days after the day before tomorrow is Saturday.
 		}}
 		Thoughts:
 		The day before tomorrow is today. 
@@ -241,4 +235,4 @@ class ChainOfThoughtAdapter(TypeAdapter):
 		if m := re.search(r"return[\s\n]*\([\s\n]*(.+)[\s\n]*\)[^\)\n]*$", answer):
 			return ChainOfThought(thoughts, super().parse(origin, m[1]))
 		
-		raise ValueError("No `return(value)` statement found.")
+		raise ValueError("No `return(answer)` statement found.")
