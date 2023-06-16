@@ -9,7 +9,7 @@ use LLMs as a black box to execute the given task.
 
 from .kernel import Kernel, DefaultKernel
 from .adapter import Adapter, TaskAdapter, PlainAdapter, TypeAdapter, ChainOfThoughtAdapter, ChainOfThought
-from .complete import Connector, Completion, Delta
+from .connectors import Connector, Completion
 from .util import ParseError, ThrottleError, BusyError
 
 semantic = DefaultKernel()

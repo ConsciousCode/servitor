@@ -1,1 +1,4 @@
 hjson
+openai
+gpt4all
+tiktoken

@@ -1,3 +1,5 @@
+This project is licensed under the [MIT license](./LICENSE).
+
 # Servitor
 Easily create "semantic functions" which use LLMs as a black box to execute the given task.
 
@@ -10,14 +12,21 @@ Easily create "semantic functions" which use LLMs as a black box to execute the 
 ["John", "Mary"]
 ```
 
-This project is licensed under the [MIT license](./LICENSE).
-
 ## Setup
+To install everything the old way:
 ```bash
 $ pip install -r servitor/requirements.txt
-$ pip install openai
 ```
 
+Or to install just the dependencies you need:
+```bash
+$ # Install your provider of choice
+$ cd project_root/
+$ pip install .[openai]
+$ pip install .[gpt4all]
+```
+
+Then import like this:
 ```python
 >>> from servitor import semantic
 ```
@@ -27,14 +36,16 @@ Auto-GPT style .env is supported by `DefaultKernel` and its singleton `semantic`
 * `OPENAI_API_KEY` - OpenAI API key (currently required, later optional when other providers are added).
 * `OPENAI_ORGANIZATION` - OpenAI organization ID for identification.
 * `MODEL` - Model to use - searches registered Connectors for a model with this name. (default: `gpt-3.5-turbo`)
+* `MODEL_PATH` - Path of the model binary to load for GPT4All.
 * `TEMPERATURE` - Temperature, "how random" it is from 0 to 2. (default: `0`)
 * `TOP_P` - Top-P logit filtering. (default: `0.9`)
 * `FREQUENCY_PENALTY` - Frequency penalty - penalizes repetition. (default: `0`)
 * `PRESENCE_PENALTY` - Presence penalty - penalizes mentioning more than once. (default: `0`)
 * `MAX_TOKENS` - Maximum number of tokens to return. (default: `1000`)
-* `MAX_RETRY` - Maximum number of times to try fixing an unparseable completion. (default: `3`)
-* `MAX_RATE` - Maximum number of requests per period. (default: `60`)
-* `MAX_PERIOD` - Period in seconds. (default: `60`)
+* `RETRY` - Maximum number of times to try fixing an unparseable completion. (default: `3`)
+* `REQUEST_RATE` - Maximum number of requests per period. (default: `60`)
+* `TOKEN_RATE` - Maximum number of tokens per period. (default: `250000`)
+* `PERIOD` - Period in seconds. (default: `60`)
 
 `Kernel` requires a `Connector` and an `Adapter` to be passed to its constructor.
 
@@ -49,6 +60,43 @@ In addition, `Kernel` instantiation and decorating can take either a `config` kw
 * `max_retry`
 * `max_rate`
 * `max_period`
+
+## Tips
+Getting language models to do what you want is like wrestling a greased pig, and even a framework like servitor can only mitigate this. Here are some tips for getting the best results:
+* Break your functions down into smaller pieces. The less you ask, and the fewer the parameters, the more reliable the results will be.
+* Play with the generation parameters like `temperature`, `top_p`, `frequency_penalty`, and `presence_penalty`.
+* Try different models. Models have different capabilities, weaknesses, and strengths.
+* Tuple outputs sound like a good idea, but they probably aren't.
+  - There are some special rules in the `TypeAdapter` to handle the LLM outputting tuples instead of lists (since JSON doesn't have tuples), but generally if a function is returning more than one thing, it's too complicated and will confuse it.
+
+## Providers
+Currently servitor supports the following LLM providers:
+* OpenAI
+* GPT4All
+
+Wish list:
+* Anthropic
+* EleutherAI
+* HuggingFace (model names might conflict with GPT4All?)
+* AI21
+* Cohere
+* GooseAI
+* Bard?
+
+## Feature wish list
+Some of these are partially implemented or untested:
+* Better support for custom / non-JSON types, especially NamedTuple and dataclasses.
+* Stream subfields of a JSON response.
+* Custom parser for common LLM mistakes
+  - Currently use HJSON, but it doesn't have tuples or sets which LLMs like to generate as non-JSON.
+  - Some LLMs will try to embed function calls, eg MongoDB queries like `{"$gt": Date.now()}`.
+  - They like to surround generation with backticks, or prepend with `return`
+* JSONformer support
+* Method detection and proper wrapping
+* Integration with OpenAI's brand new function API
+* Tree of Thought adapter
+* Automatic executive function? Break up big tasks into smaller tasks automatically
+* Better error recovery / retry logic
 
 ## How it works
 Servitor has the following components:

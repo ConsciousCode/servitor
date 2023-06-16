@@ -17,6 +17,11 @@ def typename(cls) -> str:
 	
 	origin = get_origin(cls)
 	if isinstance(cls, types.GenericAlias):
+		# Some LLMs see tuple annotation and emit (...) instead of [...] for JSON
+		# Eventually we might want to make a custom format/parser based on HJSON
+		#  which doesn't get confused by this.
+		if origin is tuple:
+			return f"[{', '.join(typename(t) for t in get_args(cls))}]"
 		return str(cls)
 	elif origin is Union:
 		args = get_args(cls)
@@ -89,7 +94,7 @@ class TaskAdapter(Adapter):
 	
 	def __call__(self, origin, *args, **kwargs):
 		task = build_task(origin, args, kwargs)
-		logger.debug(f"TaskAdapter called with {task}\n{args=}\n{kwargs=}")
+		logger.debug("TaskAdapter", extra={"task": task, "args": args, "kwargs": kwargs})
 		res = yield task
 		return res
 
@@ -108,13 +113,13 @@ class PlainAdapter(Adapter):
 		
 		task = self.task(origin, args, kwargs)
 		prompt = self.prompt(origin, task, args, kwargs)
-		logger.debug(f"{type(self).__name__} prompt:\n{prompt}")
+		logger.debug(type(self).__name__, extra={"prompt": prompt})
 		res = yield prompt
-		for _ in range(self.retry):
+		for i in range(self.retry):
 			try:
 				return self.parse(origin, res)
 			except Exception as e:
-				logger.debug(f"Failed to parse response: {e}\nResponse: {res}")
+				logger.debug(f"Failed to parse response.", extra={"error": e, "response": res})
 				res = yield self.fix(task, res, e)
 	
 	def format(self, text, *args, **kwargs):
@@ -180,6 +185,10 @@ class TypeAdapter(PlainAdapter):
 	
 	def prompt(self, origin, task, args, kwargs):
 		'''Add some extra type hints for the LLM if the return type is simple.'''
+		
+		# Type hints break chat-based models, which think they have to close the
+		#  string, list, or dict. Maybe we'll fix it later.
+		"""
 		if callable(origin):
 			ret = inspect.signature(origin).return_annotation
 			base = get_origin(ret) or ret
@@ -192,6 +201,7 @@ class TypeAdapter(PlainAdapter):
 			elif base == Union:
 				if all(get_origin(x) == Literal and get_args(x) == (str,) for x in get_args(ret)):
 					task += ' "'
+		"""
 		return super().prompt(origin, task, args, kwargs)
 	
 	def parse(self, origin, res):

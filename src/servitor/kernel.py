@@ -12,7 +12,7 @@ import asyncio
 
 from .util import default, logger
 from .adapter import Adapter, TypeAdapter
-from .complete import Connector, Completion
+from .connectors import Connector, Completion
 
 from .util import build_task
 
@@ -110,8 +110,15 @@ class Kernel:
 		config = default(config, kwargs)
 		sync_origin = force_sync(origin)
 		
-		name = ("async " if inspect.iscoroutinefunction(origin) else "") + origin.__name__
-		logger.debug(f"Building semantic function {name} with adapter {adapter.adapter_name} and {config=}")
+		if model := kwargs.get("model"):
+			connector = Connector.registry.find(model)
+		else:
+			connector = self.connector
+		
+		name = origin.__name__
+		if inspect.iscoroutinefunction(origin):
+			name = f"async {name}"
+		logger.debug(f"Building semantic function {name} with adapter {adapter.adapter_name!r} and {config=}")
 		
 		async def semantic_fn(*args, **kwargs):
 			'''Semantic function closure.'''
@@ -122,7 +129,9 @@ class Kernel:
 				prompt = next(task)
 				
 				while prompt:
-					prompt = task.send(await self.connector(prompt, **conf))
+					conn = connector(prompt, **conf)
+					res = await conn
+					prompt = task.send(res)
 			except StopIteration as e:
 				return e.value
 		
@@ -142,6 +151,11 @@ class Kernel:
 			semantic_fn = wraps(origin)(semantic_fn)
 		return wrap_synchrony(origin, semantic_fn)
 
+def clamp(v, lo, hi):
+	'''Clamp v between lo and hi.'''
+	return max(lo, min(hi, v))
+inf = float("inf")
+
 class DefaultKernel(Kernel):
 	'''Kernel with reasonable defaults for quick use. Does nothing until used.'''
 	
@@ -155,48 +169,47 @@ class DefaultKernel(Kernel):
 		from dotenv import load_dotenv
 		load_dotenv()
 		
-		if api_key := os.getenv("OPENAI_API_KEY"):
-			default_model = "gpt-3.5-turbo"
-			
-			provider = "openai"
-			organization = os.getenv("OPENAI_ORGANIZATION")
-		else:
-			raise RuntimeError("No LLM provider configured.")
+		logger.info("DefaultKernel used")
 		
 		config = dict(
-			temperature=float(os.getenv("TEMPERATURE", 0)),
-			max_tokens=int(os.getenv("MAX_TOKENS", 1000)),
-			top_p=float(os.getenv("TOP_P", 0.9)),
-			frequency_penalty=float(os.getenv("FREQUENCY_PENALTY", 0)),
-			presence_penalty=float(os.getenv("PRESENCE_PENALTY", 0)),
-			best_of=int(os.getenv("BEST_OF", 1)),
-			max_retry=int(os.getenv("MAX_RETRY", 3)),
-			max_concurrent=int(os.getenv("MAX_CONCURRENT", 1)),
-			max_rate=int(os.getenv("MAX_RATE", 1)),
-			max_period=float(os.getenv("MAX_PERIOD", 60)),
-			model=os.getenv("MODEL", default_model),
-			api_key=api_key,
-			provider=provider,
-			organization=organization
+			temperature=clamp(float(os.getenv("TEMPERATURE", 0)), 0, 2),
+			max_tokens=clamp(int(os.getenv("MAX_TOKENS", 1000)), 0, inf),
+			top_p=clamp(float(os.getenv("TOP_P", 0.9)), 0, 1),
+			frequency_penalty=clamp(float(os.getenv("FREQUENCY_PENALTY", 0)), 0, 1),
+			presence_penalty=clamp(float(os.getenv("PRESENCE_PENALTY", 0)), 0, 1),
+			#best_of=int(os.getenv("BEST_OF", 1)),
+			retry=clamp(int(os.getenv("RETRY", 3)), 0, inf),
+			concurrent=clamp(int(os.getenv("CONCURRENT", 1)), 0, inf),
+			request_rate=clamp(int(os.getenv("REQUEST_RATE", 60)), 0, inf),
+			token_rate=clamp(int(os.getenv("TOKEN_RATE", 250000)), 0, inf),
+			period=clamp(float(os.getenv("MAX_PERIOD", 60)), 0, inf)
 		)
-		logger.debug(f"Loaded configuration: {config}")
+		
+		connector = None
+		if model := os.getenv("MODEL"):
+			connector = Connector.registry.find(model)
+		
+		if connector is None:
+			if api_key := os.getenv("OPENAI_API_KEY"):
+				config['openai_api_key'] = api_key
+				config['openai_organization'] = os.getenv("OPENAI_ORGANIZATION")
+				
+				from .connectors.openai import OpenAIConnector
+				connector = OpenAIConnector
+				model = model or "gpt-3.5-turbo"
+			else:
+				raise RuntimeError("No LLM provider configured.")
+		
+		config['model'] = model
+		config['connector'] = connector
+		
+		logger.debug(f"Loaded {config=}")
 		return config
 	
 	@cached_property
 	def connector(self):
-		match self.config['provider']:
-			case "openai":
-				from .openai import OpenAIConnector
-				return OpenAIConnector(
-					self.config["api_key"],
-					self.config["model"],
-					self.config["max_concurrent"],
-					self.config['max_rate'],
-					self.config['max_period']
-				)
-			case _:
-				raise RuntimeError(f"Unknown LLM provider {self.config['provider']}.")
+		return self.config['connector'](**self.config)
 	
 	@cached_property
 	def adapter(self):
-		return TypeAdapter(self.config['max_retry'])
+		return TypeAdapter(self.config['retry'])
