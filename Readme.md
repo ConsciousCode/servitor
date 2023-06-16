@@ -68,6 +68,7 @@ Getting language models to do what you want is like wrestling a greased pig, and
 * Try different models. Models have different capabilities, weaknesses, and strengths.
 * Tuple outputs sound like a good idea, but they probably aren't.
   - There are some special rules in the `TypeAdapter` to handle the LLM outputting tuples instead of lists (since JSON doesn't have tuples), but generally if a function is returning more than one thing, it's too complicated and will confuse it.
+* If it still disobeys, try few-shot prompting. The `TypeAdapter` prompt is carefully crafted to be zero-shot to preserve tokens, but it can be worth adding examples to semantic functions which are called less often.
 
 ## Providers
 Currently servitor supports the following LLM providers:
