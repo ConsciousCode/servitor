@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.append(os.path.abspath("."))
 sys.path.append(os.path.abspath("src"))
-#'''
+'''
 import logging
 
 logger = logging.getLogger("servitor")
@@ -53,7 +53,7 @@ def zork_update(env: dict, cmd: str, response: str) -> dict:
 	"""Given an environment, command, and its response, return updates to the environment. Set values to null to delete them. This is stateless, so it adds important details to remember in future commands."""
 
 HISTORY_LEN = 10
-SAVE_FILE = "zork.json"
+SAVE_FILE = "private/zork.json"
 
 @dataclass
 class State:
