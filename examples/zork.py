@@ -105,7 +105,7 @@ def main():
 			state.add_cmd(cmd, out)
 			merge(state.env, zork_update(state.env, cmd, out))
 			
-			with open("zork.json", "w") as f:
+			with open(SAVE_FILE, "w") as f:
 				json.dump(asdict(state), f)
 
 if __name__ == "__main__":

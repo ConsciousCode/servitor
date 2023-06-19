@@ -23,7 +23,7 @@ $ pip install -r servitor/requirements.txt
 Or to install just the dependencies you need:
 ```bash
 $ # Install your provider of choice
-$ cd project_root/
+$ cd <project root>/
 $ pip install .[openai]
 $ pip install .[gpt4all]
 ```
@@ -137,7 +137,7 @@ All adapters are contained within `adapter.py`. Anywhere an adapter is expected,
 * `TaskAdapter` - (`"task"`) Simplest adapter, just passes the prompt through to the LLM and returns the result.
 * `PlainAdapter` - (`"plain"`) Prompts the LLM to give an answer rather than simply complete, but has no parsing. Mostly used as a base class for more advanced adapters.
 * `TypeAdapter` - (`"type"`) Uses type annotations and HJSON to prompt and parse the result.
-* `ChainOfThoughtAdapter` - (`"cot"`) Uses Chain of Thought prompting to get a more coherent response. It also wraps the result in a `ChainOfThought` named tuple `(thoughts, answer)`.
+* `ChainOfThoughtAdapter` - (`"chain"`) Uses Chain of Thought prompting to get a more coherent response. It also wraps the result in a `ChainOfThought` named tuple `(thoughts, answer)`.
 
 ### Connectors
 The common classes for connectors are in `complete.py`, but each connector has its own file which is loaded dynamically to avoid unused dependencies.
@@ -204,11 +204,20 @@ Dumber models can be used for dumber tasks:
 "This is an example of placeholder Latin text, commonly known as Lorem Ipsum."
 ```
 
+### Zork
+A more advanced example is provided in [](examples/zork.py). This implements a simple Zork-like game using semantic functions as the driver. To play,
+```bash
+$ cd <project root>/
+$ python examples/zork.py
+```
+
+It saves your progress in `private/zork.json` and you can reset it by deleting that file.
+
 ## Synchrony
 Servitor preserves the async of the function definition. Decorating an async function will use the connector's async interface automatically:
 
 ```python
->>> @semantic(adapter="cot")
+>>> @semantic(adapter="chain")
 ... async def summarize(concept: str) -> str:
 ... 	"""Summarize the given text in two sentences or less."""
 ...
