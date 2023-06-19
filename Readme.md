@@ -1,6 +1,6 @@
+# Servitor
 <img src="static/sigil.png" width="100" style="float:right"/>
 
-# Servitor
 Easily create "semantic functions" which use LLMs as a black box to execute the given task.
 
 ```python
