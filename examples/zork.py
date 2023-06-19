@@ -8,19 +8,23 @@ import sys
 import os
 sys.path.append(os.path.abspath("."))
 sys.path.append(os.path.abspath("src"))
-'''
-import logging
 
-logger = logging.getLogger("servitor")
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s %(message)s')
-logger.addHandler(handler)
-#'''
+if os.getenv("DEBUG"):
+	import logging
+
+	logger = logging.getLogger("servitor")
+	logger.setLevel(logging.DEBUG)
+	handler = logging.StreamHandler(sys.stdout)
+	handler.setLevel(logging.DEBUG)
+	formatter = logging.Formatter('%(asctime)s %(message)s')
+	logger.addHandler(handler)
+
 from typing import Mapping
 import json
 from dataclasses import dataclass, asdict
+
+# Makes input smarter
+import readline
 
 from servitor import semantic
 
@@ -45,12 +49,12 @@ def zork_charbuild(name: str) -> dict:
 	print("Building character...")
 
 @semantic
-def zork_cmd(env: dict, history: list[str], cmd: str) -> tuple[str, dict]:
+def zork_cmd(env: dict, history: list[str], cmd: str) -> str:
 	"""Given an environment and command, return the command response."""
 
 @semantic
 def zork_update(env: dict, cmd: str, response: str) -> dict:
-	"""Given an environment, command, and its response, return updates to the environment. Set values to null to delete them. This is stateless, so it adds important details to remember in future commands."""
+	"""Return updates to apply to the environment, or null to delete the corresponding property."""
 
 HISTORY_LEN = 10
 SAVE_FILE = "private/zork.json"

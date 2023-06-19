@@ -1,6 +1,8 @@
 import unittest
-from servitor import semantic, Kernel, ChainOfThought
 from asyncio import run
+import sys
+sys.path.append("src")
+from servitor import semantic, Kernel, ChainOfThought
 
 class TestServitor(unittest.TestCase):
 
@@ -18,7 +20,7 @@ class TestServitor(unittest.TestCase):
             return """Classify the valence of the given text as a value between -1 and 1."""
 
         valence = classify_valence("I am happy.")
-        self.assertTrue(-1 <= valence <= 1)
+        self.assertTrue(0 <= valence <= 1)
 
     def test_plain_adapter(self):
         @semantic(adapter="plain")

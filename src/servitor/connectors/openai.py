@@ -3,26 +3,32 @@ OpenAI REST API connector and completion.
 '''
 
 import openai
+import openai.error
 import tiktoken
-from . import Throttle, Completion, Connector
-from ..util import logger, async_await
+from contextlib import contextmanager
+from functools import cached_property
+
+from . import Throttle, Connector
+from .. import defaults
+from ..util import logger, async_await, BusyError, ThrottleError
 
 logger.info("Import OpenAI connector")
 
-class OpenAICompletion(Completion):
+@contextmanager
+def transmute_errors():
+	'''Convert errors we may need to catch to our own exceptions.'''
+	try:
+		yield
+	except openai.error.RateLimitError as e:
+		raise ThrottleError() from e
+	except (openai.error.ServiceUnavailableError, openai.error.TryAgain) as e:
+		raise BusyError() from e
+
+class OpenAICompletion:
 	'''A completion from OpenAI. Handles both text and chat completions.'''
 	
-	# Maps chat-only models to (per_msg, per_name) token counts
-	chat_only = {
-		"gpt-3.5-turbo": (4, -1),
-		"gpt-3.5-turbo-0301": (4, -1),
-		"gpt-4": (3, 1),
-		"gpt-4-0314": (3, 1),
-		"gpt-4-0613": (3, 1),
-	}
-	
-	def __init__(self, connector, config):
-		self.connector = connector
+	def __init__(self, throttle, config):
+		self.throttle = throttle
 		self.config = config
 		
 		try:
@@ -32,16 +38,22 @@ class OpenAICompletion(Completion):
 		
 		model = config['model']
 		
-		if model in self.chat_only:
+		gpt3_5 = model.startswith("gpt-3.5")
+		gpt4 = model.startswith("gpt-4")
+		
+		# Ref: https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
+		if gpt3_5 or gpt4:
+			if gpt3_5:
+				per_msg, per_name = 4, -1
+			else:
+				per_msg, per_name = 3, 1
+				
 			msgs = [{
 				# Models tend to prefer user instructions over system prompts.
 				"role": "user",
 				"content": config.pop("prompt")
 			}]
 			config['messages'] = msgs
-			
-			# Ref: https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
-			per_msg, per_name = self.chat_only[model]
 			
 			tokens = len(msgs)*per_msg + 3
 			for msg in msgs:
@@ -52,68 +64,79 @@ class OpenAICompletion(Completion):
 		else:
 			tokens = len(enc.encode(config['prompt']))
 		
-		self.token_count = tokens
+		self.tokens = tokens
 	
 	def completion_type(self):
-		if self.config['model'] in self.chat_only:
+		model = self.config['model']
+		if model.startswith("gpt-3.5") or model.startswith("gpt-4"):
 			return openai.ChatCompletion
 		else:
 			return openai.Completion
 	
 	async def __aiter__(self):
-		async with self.connector.throttle(self.token_count):
-			async for item in self.completion_type().aiter(**self.config):
-				delta = item['choices'][0]['delta']
-				if delta.get("finish_reason"):
-					break
-				self.connector.throttle.add_tokens(1)
-				yield delta
+		with transmute_errors():
+			async with self.throttle.alock(self.tokens):
+				async for item in self.completion_type().aiter(stream=True, **self.config):
+					delta = item['choices'][0]['delta']
+					if delta.get("finish_reason"):
+						break
+					self.throttle.output(1)
+					yield delta
 	
 	@async_await
 	async def __await__(self):
-		async with self.connector.throttle(self.token_count):
-			res = await self.completion_type().acreate(**self.config)
-			self.connector.throttle.add_tokens(res['usage']['completion_tokens'])
-			return res['choices'][0]['message']['content']
+		with transmute_errors():
+			async with self.throttle.alock(self.tokens):
+				res = await self.completion_type().acreate(**self.config)
+				self.throttle.output(res['usage']['completion_tokens'])
+				return res['choices'][0]['message']['content']
+	
+	def sync(self):
+		with transmute_errors():
+			with self.throttle.lock(self.tokens):
+				res = self.completion_type().create(**self.config)
+				self.throttle.output(res['usage']['completion_tokens'])
+				return res['choices'][0]['message']['content']
 
 @Connector.register("openai")
 class OpenAIConnector(Connector):
-	'''Connector for OpenAI API.'''
-	
-	models = None
-	
-	def __init__(self, *, openai_api_key=None, model=None, concurrent=1, request_rate=60, token_rate=250000, period=60, **other):
-		'''
-		Parameters:
-			api_key: API key
-			engine: Engine to use
-		'''
+	def __init__(self):
 		super().__init__()
-		self.api_key = openai_api_key
-		self.model = model
-		self.throttle = Throttle(request_rate, token_rate, period, concurrent)
-	
-	def __call__(self, prompt, **kwargs):
-		model = kwargs.get("model", self.model)
-		if model is None:
-			raise ValueError("No model specified")
 		
-		return OpenAICompletion(self, {
-			"prompt": prompt,
-			"api_key": self.api_key,
-			"model": model,
-			"temperature": kwargs.get("temperature"),
-			"max_tokens": kwargs.get("max_tokens"),
-			"top_p": kwargs.get("top_p"),
-			"frequency_penalty": kwargs.get("frequency_penalty"),
-			"presence_penalty": kwargs.get("presence_penalty"),
-			"stop": kwargs.get("stop"),
-			# openai library doesn't recognize this?
-			#"best_of": kwargs.get("best_of")
-		})
+		self.throttle = {}
 	
-	@classmethod
-	def supports(cls, key):
-		if cls.models is None:
-			cls.models = [model['id'] for model in openai.Engine.list()['data']]
-		return key in cls.models
+	@cached_property
+	def model_list(self):
+		return [model['id'] for model in openai.Engine.list()['data']]
+	
+	def supports(self, config):
+		return config.get("openai_api_key") or config.get("model") in self.model_list
+	
+	def complete(self, prompt, config):
+		# Use id to reduce potential for leaking API keys
+		api_key = id(config['openai_api_key'])
+		if api_key not in self.throttle:
+			self.throttle[api_key] = Throttle(
+				config["request_rate"],
+				config["token_rate"],
+				config["period"],
+				config["concurrent"]
+			)
+		
+		if config['top_k']:
+			logger.warn("OpenAI does not support top_k, ignoring")
+		
+		# TODO: api_base, api_type_, request_id, api_version
+		# TODO: best_of (my version of OpenAI doesn't support it)
+		return OpenAICompletion(self.throttle[api_key], {
+			# OpenAI is sensitive to too many parameters, so we only pass the ones we need.
+			"prompt": prompt,
+			"model": config.get("model", defaults.openai['model']),
+			"organization": config.get("openai_organization"),
+			"temperature": config["temperature"],
+			"top_p": config["top_p"],
+			"frequency_penalty": config["frequency_penalty"],
+			"presence_penalty": config["presence_penalty"],
+			"max_tokens": config["max_tokens"],
+			"stop": config.get("stop")
+		})

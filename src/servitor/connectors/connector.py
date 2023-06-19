@@ -3,11 +3,11 @@ LLM provider connector base class.
 '''
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Iterator, NamedTuple, TypeAlias, Protocol, Optional
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import contextmanager, asynccontextmanager
 import time
-from ..util import Registry, logger
+from ..util import logger
 
 class Throttle:
 	'''
@@ -15,6 +15,8 @@ class Throttle:
 	* Concurrent requests
 	* Requests per period
 	* Tokens per period
+	
+	TODO: Support separate input/output token rates.
 	'''
 	
 	def __init__(self, request_rate: float, token_rate: int, period: float=1, concurrent=3):
@@ -33,66 +35,94 @@ class Throttle:
 		self.before = time.monotonic()
 		self.concurrent = asyncio.Semaphore(concurrent)
 	
+	def can_proceed(self, input):
+		now = time.monotonic()
+		dt = now - self.before
+		self.before = now
+		self.token_allowance = min(self.token_rate, self.token_allowance + dt * self.token_rate / self.period)
+		self.request_allowance = min(self.request_rate, self.request_allowance + dt * self.request_rate / self.period)
+		if self.token_allowance >= input and self.request_allowance >= 1:
+			self.token_allowance -= input
+			self.request_allowance -= 1
+			return True
+		
+		if self.token_allowance < input:
+			logger.info(f"Throttling too many tokens {input} / {self.token_allowance}")
+		if self.request_allowance < 1:
+			logger.info("Throttling too many requests")
+		
+		return False
+	
 	@asynccontextmanager
-	async def __call__(self, tokens):
-		if self.concurrent.locked():
-			logger.info("Throttling concurrent requests")
+	async def alock(self, input):
+		'''Acquire a lock for the given number of input tokens (asynchronous).'''
 		
 		async with self.concurrent:
-			while True:
-				now = time.monotonic()
-				dt = now - self.before
-				self.before = now
-				self.token_allowance = min(self.token_rate, self.token_allowance + dt * self.token_rate / self.period)
-				self.request_allowance = min(self.request_rate, self.request_allowance + dt * self.request_rate / self.period)
-				if self.token_allowance >= tokens and self.request_allowance >= 1:
-					self.token_allowance -= tokens
-					self.request_allowance -= 1
-					break
-				
-				if self.token_allowance < tokens:
-					logger.info(f"Throttling too many tokens {tokens} / {self.token_allowance}")
-				if self.request_allowance < 1:
-					logger.info("Throttling too many requests")
+			while not self.can_proceed(input):
 				await asyncio.sleep(0.1)
-			
 			yield
+
+	@contextmanager
+	def lock(self, input):
+		'''Acquire a lock for the given number of input tokens (blocking).'''
+		
+		while not self.can_proceed(input):
+			time.sleep(0.1)
+		yield
 	
-	def add_tokens(self, tokens):
-		'''Add tokens to the allowance.'''
+	def output(self, tokens):
+		'''Add output tokens to the allowance.'''
 		self.token_allowance = min(self.token_rate, self.token_allowance + tokens)
 
-class Completion(ABC):
+class ModelConfig(NamedTuple):
+	'''Configuration describing a model, its capabilities, and its modalities.'''
+	
+	name: str
+	chat_only: bool
+	context: int
+
+class Completion(Protocol):
 	'''
 	A completion from a language model. Supports both streaming (via async
 	iterators) and blocking (via awaitable).
 	'''
 	
-	@abstractmethod
 	def __aiter__(self) -> AsyncIterator[str]:
 		'''Stream the completion one token at a time.'''
-		pass
-	
-	@abstractmethod
 	def __await__(self) -> Iterator[str]:
 		'''Wait for the completion to finish.'''
-		pass
+	def __iter__(self) -> Iterator[str]:
+		'''Blocking stream of the completion one token at a time.'''
+	def sync(self) -> str:
+		'''Use the blocking interface to return the completion as a string.'''
 
 class Connector(ABC):
 	'''Generic connector for a language model endpoint.'''
 	
-	models: list[str]
-	registry = Registry()
+	registry: dict[str, 'Connector'] = {}
 	
 	@staticmethod
 	def register(name):
+		assert isinstance(name, str)
+		
 		def	decorator(cls):
 			logger.debug(f"Registering connector {cls.__name__} as {name!r}")
-			Connector.registry.register(name, cls.supports)
+			Connector.registry[name] = cls()
 			return cls
 		return decorator
 	
 	@classmethod
-	def supports(cls, connector):
-		if connector in cls.models:
-			return cls()
+	def find(cls, config) -> 'Connector':
+		for name, connector in cls.registry.items():
+			if connector.supports(config):
+				# Note: lazy loaders may update registry in supports()
+				return cls.registry[name]
+		raise KeyError(f"No connector found (model={config['model']!r})")
+	
+	@abstractmethod
+	def supports(self, config) -> bool:
+		'''Return a known connector which supports the given configuration, else None.'''
+	
+	@abstractmethod
+	def complete(self, prompt, config) -> Completion:
+		'''Build a completion from the given prompt and configuration.'''

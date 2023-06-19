@@ -6,158 +6,229 @@ tools, though this sort of functionality can be built *on top* of kernels.
 '''
 
 from functools import wraps, cached_property
-from typing import Optional, Callable
+import typing
+from typing import Optional, Callable, TypeAlias, Protocol, TypedDict, TypeVar, ParamSpec, Awaitable
+from types import NoneType
 import inspect
-import asyncio
 
-from .util import default, logger
-from .adapter import Adapter, TypeAdapter
-from .connectors import Connector, Completion
+from .util import default, logger, parse_bool
+from .adapter import Adapter, TypeAdapter, AdapterRef
+from .connectors import Completion, Connector
+from . import defaults
 
-from .util import build_task
+NotRequired = getattr(typing, "NotRequired", Optional)
 
-def optargs_decorator_method(fn_decorator):
-	'''Create a method decorator which can optionally accept arguments.'''
+P = ParamSpec("P")
+R = TypeVar("R")
+
+class SyncDocstringSemanticFunction(Protocol):
+	'''Semantic function built using its docstring.'''
+	__doc__: str
+	def __call__(self, *args: P.args, **kwargs: P.kwargs) -> NoneType: ...
+SyncSemanticOrigin: TypeAlias = str|SyncDocstringSemanticFunction|Callable[P, str]
+
+class AsyncDocstringSemanticFunction(Protocol):
+	'''Semantic function built using its docstring.'''
+	__doc__: str
+	def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Awaitable[None]: ...
+AsyncSemanticOrigin: TypeAlias = AsyncDocstringSemanticFunction|Callable[P, Awaitable[str]]
+
+SyncSemanticFunction: TypeAlias = Callable[P, R]
+AsyncSemanticFunction: TypeAlias = Callable[P, Awaitable[R]]
+
+class KernelConfig(TypedDict, total=False):
+	'''Configuration for a kernel.'''
 	
-	@wraps(fn_decorator)
-	def optional_arg(self, fn_decoratee=None, *args, **kwargs):
-		'''Generic optional-argument decorator.'''
+	open_api_key: NotRequired[str]
+	'''API key for some providers.'''
+	model: NotRequired[str]
+	'''Model name for the connector.'''
+	temperature: NotRequired[float]
+	'''Temperature for gerating completions.'''
+	top_p: NotRequired[float]
+	'''Top-P logit filtering.'''
+	top_k: NotRequired[int]
+	'''Top-K logit filtering - not always supported.'''
+	frequency_penalty: NotRequired[float]
+	'''Frequency penalty for generating completions.'''
+	presence_penalty: NotRequired[float]
+	'''Presence penalty for generating completions.'''
+	max_tokens: NotRequired[int]
+	'''Maximum number of tokens to generate.'''
+	retry: NotRequired[int]
+	'''Number of times to retry a request.'''
+	concurrent: NotRequired[int]
+	'''Maximum number of concurrent requests to allow (if connector supports throttling).'''
+	request_rate: NotRequired[float]
+	'''Number of requests per period (if connector supports throttling).'''
+	token_rate: NotRequired[float]
+	'''Number of tokens per period (if connector supports throttling).'''
+	period: NotRequired[float]
+	'''Period for request and token rate (if connector supports throttling).'''
+
+def _build_async_semantic_fn(origin, connector, adapter, config) -> AsyncSemanticFunction:
+	'''Build an async semantic function from preconstructed parameters.'''
+	
+	# Origin is async to indicate synchrony, but doesn't await anything.
+	#  Adapter expects a synchronous function, so we have to wrap it.
+	@wraps(origin)
+	def sync_origin(*args, **kwargs):
+		'''Make a non-awaiting async function synchronous.'''
 		
-		@wraps(fn_decorator)
-		def forward(fn_decoratee):
-			'''Forward all arguments to the decorator.'''
-			return fn_decorator(self, fn_decoratee, *args, **kwargs)
-		
-		if fn_decoratee is not None:
-			return forward(fn_decoratee)
-		return forward
-	return optional_arg
-
-def wrap_synchrony(origin, fn):
-	'''Wrap fn (async) to have the same synchrony as origin.'''
-	
-	if inspect.iscoroutinefunction(origin):
-		return fn
-	
-	@wraps(fn)
-	def await_fn(*args, **kwargs):
-		return asyncio.run(fn(*args, **kwargs))
-	return await_fn
-
-def force_sync(fn):
-	'''
-	Given an async function, wrap it as a synchronous function. This assumes
-	the function is "essentially" synchronous. It will throw an error if it
-	tries to await anything!
-	'''
-	
-	# No need to wrap
-	if not inspect.iscoroutinefunction(fn):
-		return fn
-	
-	@wraps(fn)
-	def sync_fn(*args, **kwargs):
-		coro = fn(*args, **kwargs).__await__()
+		coro = origin(*args, **kwargs).__await__()
 		try:
-			coro = coro.send(None)
-			if coro is not None:
+			if coro.send(None) is not None:
 				raise RuntimeError("Semantic function definitions cannot await!")
+			raise RuntimeError("Malformed awaitable did not stop iteration.")
 		except StopIteration as e:
 			return e.value
-		raise RuntimeError("Malformed awaitable did not stop iteration.")
-	return sync_fn
+	
+	@wraps(origin)
+	async def async_semantic_fn(*args, **kwargs):
+		'''Semantic function closure.'''
+		
+		try:
+			task = adapter(sync_origin, *args, **kwargs)
+			prompt = next(task)
+			while prompt:
+				completion = connector.complete(prompt, config)
+				prompt = task.send(await completion)
+		except StopIteration as e:
+			return e.value
+	
+	return async_semantic_fn
+
+def _build_sync_semantic_fn(origin, connector, adapter, config) -> SyncSemanticFunction:
+	'''Build a synchronous semantic function from preconstructed parameters.'''
+	
+	def sync_semantic_fn(*args, **kwargs):
+		'''Semantic function closure.'''
+		
+		try:
+			task = adapter(origin, *args, **kwargs)
+			prompt = next(task)
+			while prompt:
+				completion = connector.complete(prompt, config)
+				prompt = task.send(completion.sync())
+		except StopIteration as e:
+			return e.value
+	
+	# Could be string or function
+	if callable(origin):
+		return wraps(origin)(sync_semantic_fn)
+	return sync_semantic_fn
 
 class Kernel:
 	'''
 	Aggregates machinery needed to execute and coordinate semantic functions.
 	'''
 	
-	def __init__(self, connector: str|Connector, adapter: str|Adapter, config=None, **kwargs):
+	def __init__(self, adapter: AdapterRef, config: Optional[KernelConfig]=None, **kwargs):
 		'''
 		Parameters:
-			connector: Connector for LLM instance
-			adapter: Parsing and session maintenance for the LLM's responses
-			config: Default configuration for connector (if unset, kwargs are used)
-			
+			adapter: Parsing and session maintenance for the LLM's responses.
+			config: Default configuration for connector (merged with kwargs).
+			name: Optional name for the kernel, used for error messages.
 		'''
-		self.connector = Connector.registry.find(connector)
 		self.adapter = Adapter.registry.find(adapter)
-		self.config = default(config, kwargs)
+		self.config = {**defaults.config, **(config or {}), **kwargs}
 	
-	def complete(self, origin: str|Callable, *args, config=None, **kwargs) -> Completion:
+	def complete(self, prompt: str, config: Optional[KernelConfig]=None, **kwargs) -> Completion:
 		'''Normal completion.'''
 		
-		return self.connector(build_task(origin, args, kwargs), **default(config, kwargs))
-	
-	@optargs_decorator_method
+		config = {**self.config, **(config or {}), **kwargs}
+		connector = Connector.find(config)
+		return connector.complete(prompt, config)
+		
 	def __call__(self,
-			origin: str|type|Callable,
-			adapter: Optional[Callable]=None,
-			*,
-			config=None,
-			**kwargs
+	    	origin: Optional[SyncSemanticOrigin|AsyncSemanticOrigin]=None,
+		    adapter: Optional[AdapterRef]=None,
+		    *,
+		    config: Optional[KernelConfig]=None,
+		    **kwargs
 		):
 		'''
 		Build a semantic function from its metadata. Also works as a decorator.
 		
 		Parameters:
-			task: Task description, either a string or a callable that returns
-			  a string or a dictionary.
+			origin: Origin of the semantic function, a string, a class, or a function.
 			adapter: Adapter to use for this function.
+			config: Configuration for this function.
+			kwargs: Additional configuration for this function (merged with config).
 		'''
 		
-		adapter = Adapter.registry.find(default(adapter, lambda: self.adapter))
-		config = default(config, kwargs)
-		sync_origin = force_sync(origin)
+		config = {**self.config, **(config or {}), **kwargs}
 		
-		if model := kwargs.get("model"):
-			connector = Connector.registry.find(model)
-		else:
-			connector = self.connector
+		if not isinstance(origin, (str, type, Callable, NoneType)):
+			raise TypeError(f"Origin {origin!r} must be a string, class, or function.")
 		
-		name = origin.__name__
-		if inspect.iscoroutinefunction(origin):
-			name = f"async {name}"
-		logger.debug(f"Building semantic function {name} with adapter {adapter.adapter_name!r} and {config=}")
+		if not isinstance(adapter, (str, Adapter, Callable, NoneType)):
+			raise TypeError(f"Adapter {adapter!r} must be a string, adapter, or coroutine.")
 		
-		async def semantic_fn(*args, **kwargs):
-			'''Semantic function closure.'''
+		adapter = Adapter.find(adapter or self.adapter)
+		connector = Connector.find(config)
+		
+		def decorator(origin):
+			'''Semantic function decorator.'''
 			
-			conf = {**self.config, **config}
-			try:
-				task = adapter(sync_origin, *args, **kwargs)
-				prompt = next(task)
-				
-				while prompt:
-					conn = connector(prompt, **conf)
-					res = await conn
-					prompt = task.send(res)
-			except StopIteration as e:
-				return e.value
-		
-		# Wrap the __call__ method if it's a class
-		if isinstance(origin, type):
-			if not hasattr(origin, "__call__"):
+			# Decorating class wraps the __call__ method
+			if inspect.isclass(origin):
+				if hasattr(origin, "__call__"):
+					call = decorator(origin.__call__)
+					origin.__call__ = call
+					call.__name__ = f"{origin.__name__}.__call__"
+					
+					return origin
 				raise TypeError(f"Task {origin} instances must be callable.")
 			
-			origin_class = origin
-			origin = origin.__call__ # Assign so semantic_fn can see it
-			semantic_fn = wrap_synchrony(origin, semantic_fn)
-			origin_class.__call__ = wraps(origin)(semantic_fn)
-			origin_class.__name__ = f"{origin_class.__name__}.__call__"
-			return origin_class
+			# Build the semantic function with the right synchrony
+			if inspect.iscoroutinefunction(origin):
+				return _build_async_semantic_fn(origin, connector, adapter, config)
+			else:
+				return _build_sync_semantic_fn(origin, connector, adapter, config)
 		
-		if callable(origin):
-			semantic_fn = wraps(origin)(semantic_fn)
-		return wrap_synchrony(origin, semantic_fn)
+		# Apply decorator if we know the origin
+		return decorator(origin) if origin else decorator
 
-def clamp(v, lo, hi):
-	'''Clamp v between lo and hi.'''
-	return max(lo, min(hi, v))
+def clamp(t, lo, hi):
+	'''Closure to clamp between lo and hi.'''
+	return lambda v: max(lo, min(hi, t(v)))
 inf = float("inf")
+
+# Configuration schema
+CONFIG_SCHEMA = dict(
+	# OpenAI
+	openai_api_key = str,
+	openai_organization = str,
+	
+	# GPT4All
+	model_path = str,
+	allow_download = parse_bool,
+	
+	# Common parameters
+	model = str,
+	
+	# Generation parameters
+	temperature = clamp(float, 0, 2),
+	top_p = clamp(float, 0, 1),
+	top_k = clamp(int, 0, inf),
+	frequency_penalty = clamp(float, 0, 1),
+	presence_penalty = clamp(float, 0, 1),
+	max_tokens = clamp(int, 0, inf),
+	best_of = clamp(int, 1, inf),
+	
+	# Throttling
+	retry = clamp(int, 0, inf),
+	concurrent = clamp(int, 1, inf),
+	request_rate = clamp(int, 0, inf),
+	token_rate = clamp(int, 0, inf),
+	period = clamp(float, 0, inf)
+)
 
 class DefaultKernel(Kernel):
 	'''Kernel with reasonable defaults for quick use. Does nothing until used.'''
+	
+	__name__ = "semantic"
 	
 	def __init__(self):
 		# no super().__init__() to avoid overwriting properties
@@ -165,50 +236,20 @@ class DefaultKernel(Kernel):
 	
 	@cached_property
 	def config(self):
+		logger.info("DefaultKernel used")
+		
 		import os
 		from dotenv import load_dotenv
 		load_dotenv()
 		
-		logger.info("DefaultKernel used")
-		
-		config = dict(
-			temperature=clamp(float(os.getenv("TEMPERATURE", 0)), 0, 2),
-			max_tokens=clamp(int(os.getenv("MAX_TOKENS", 1000)), 0, inf),
-			top_p=clamp(float(os.getenv("TOP_P", 0.9)), 0, 1),
-			frequency_penalty=clamp(float(os.getenv("FREQUENCY_PENALTY", 0)), 0, 1),
-			presence_penalty=clamp(float(os.getenv("PRESENCE_PENALTY", 0)), 0, 1),
-			#best_of=int(os.getenv("BEST_OF", 1)),
-			retry=clamp(int(os.getenv("RETRY", 3)), 0, inf),
-			concurrent=clamp(int(os.getenv("CONCURRENT", 1)), 0, inf),
-			request_rate=clamp(int(os.getenv("REQUEST_RATE", 60)), 0, inf),
-			token_rate=clamp(int(os.getenv("TOKEN_RATE", 250000)), 0, inf),
-			period=clamp(float(os.getenv("MAX_PERIOD", 60)), 0, inf)
-		)
-		
-		connector = None
-		if model := os.getenv("MODEL"):
-			connector = Connector.registry.find(model)
-		
-		if connector is None:
-			if api_key := os.getenv("OPENAI_API_KEY"):
-				config['openai_api_key'] = api_key
-				config['openai_organization'] = os.getenv("OPENAI_ORGANIZATION")
-				
-				from .connectors.openai import OpenAIConnector
-				connector = OpenAIConnector
-				model = model or "gpt-3.5-turbo"
-			else:
-				raise RuntimeError("No LLM provider configured.")
-		
-		config['model'] = model
-		config['connector'] = connector
+		config = {}
+		for name, schema in CONFIG_SCHEMA.items():
+			value = os.getenv(name.upper()) or defaults.config.get(name)
+			if value is not None and value != "":
+				config[name] = schema(value)
 		
 		logger.debug(f"Loaded {config=}")
 		return config
-	
-	@cached_property
-	def connector(self):
-		return self.config['connector'](**self.config)
 	
 	@cached_property
 	def adapter(self):

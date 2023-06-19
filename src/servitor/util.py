@@ -2,7 +2,13 @@
 Common utilities.
 '''
 
-from typing import TypeVar, Optional, Callable
+import typing
+from typing import TypeVar, Optional, Callable, Union, Literal, GenericAlias, Any
+# collections.abc versions are canonical, typing versions are deprecated
+from collections.abc import Mapping, Sequence
+from types import NoneType
+import dataclasses
+from enum import Enum
 import inspect
 import logging
 import os
@@ -37,24 +43,6 @@ class BusyError(ConnectionError):
 	'''Error raised when the LLM endpoint is busy.'''
 	pass
 
-class Registry:
-	'''Generic registry for mapping names to objects.'''
-	
-	def __init__(self):
-		self.registry = {}
-	
-	def find(self, key):
-		if isinstance(key, str):
-			for k, supports in self.registry.items():
-				if x := supports(key):
-					return x
-			raise KeyError(key)
-		else:
-			return key
-	
-	def register(self, name, supports):
-		self.registry[name] = supports
-
 def build_task(origin, args, kwargs):
 	'''
 	Common function for building a task from a string or function. Uses the
@@ -73,3 +61,203 @@ def async_await(fn):
 	def wrapper(*args, **kwargs):
 		return fn(*args, **kwargs).__await__()
 	return wrapper
+
+def parse_bool(value: Any) -> bool:
+	'''Permissive parsing of boolean values.'''
+	
+	if isinstance(value, str):
+		value = value.lower()
+	
+	match value:
+		case 1 | True | "t" | "true" | "y" | "yes" | "on" | "enable" | "1":
+			return True
+		
+		case 0 | False | None | "f" | "false" | "n" | "no" | "off" | "disable" | "0" | "":
+			return False
+	
+	raise ValueError(f"Cannot convert {value!r} to bool")
+
+def typename(cls) -> str:
+	'''Convert an annotation into a typename string for the LLM.'''
+	
+	cls = normalize_type(cls)
+	
+	origin = typing.get_origin(cls)
+	if origin is Union:
+		args = typing.get_args(cls)
+		if NoneType in args:
+			rest = [typename(t) for t in args if t is not NoneType]
+			base = rest[0] if len(rest) == 1 else f'({"|".join(rest)})'
+			return f"{base}?"
+		return "|".join(typename(t) for t in args)
+	elif origin is Literal:
+		return "|".join(map(repr, typing.get_args(cls)))
+	elif cls is Any:
+		return "any"
+	elif hints := typing.get_type_hints(cls):
+		fields = []
+		for field, ft in hints.items():
+			fields.append(field if ft is Any else f"{field}: {typename(ft)}")
+		return f"{{{', '.join(fields)}}}"
+	elif isinstance(cls, GenericAlias):
+		return repr(cls)
+	elif isinstance(cls, type):
+		return cls.__name__
+	elif isinstance(cls, str):
+		return cls
+	elif cls is ...:
+		return "..."
+	else:
+		return repr(cls)
+
+def build_generic(origin, args):
+	'''Indirection helper for building generic types without IDE complaining.'''
+	return origin[tuple(map(normalize_type, args))]
+
+def normalize_type(cls) -> type:
+	'''Normalize the type annotation for use in typechecking.'''
+	
+	if isinstance(cls, str):
+		return cls
+	
+	if cls in {object, Enum, Union, Any, bool, int, float}: return cls
+	if cls in {None, NoneType}: return NoneType
+	if cls in {str, typing.Text}: return str
+	if cls in {list, typing.List}: return list
+	if cls in {tuple, typing.Tuple}: return tuple
+	if cls in {dict, typing.Dict}: return dict
+	if cls in {set, typing.Set}: return set
+	if cls in {frozenset, typing.FrozenSet}: return frozenset
+	
+	# typing are deprecated aliases to collections
+	if cls in {Sequence, typing.Sequence}:
+		return Sequence
+	if cls in {Mapping, typing.Mapping}:
+		return Mapping
+	
+	origin, args = typing.get_origin(cls), typing.get_args(cls)
+	
+	# Optional is an alias for Union[None, T] and Optional[Union[...]] == Union[..., None]
+	if origin is Union:
+		return build_generic(Union, args)
+	
+	return build_generic(normalize_type(origin), args)
+
+def typecast(value: Any, target: str|type|None) -> Any:
+	'''Reasonable typecasting and typechecking for LLM values.'''
+	
+	target = normalize_type(target)
+	
+	# String annotations aren't qualified
+	if isinstance(target, str):
+		return value
+	
+	# Simple casts
+	if type(value) is target or target is Any: return value
+	if target is float: return float(value)
+	if target is str: return str(value)
+	
+	# Unqualified collection types
+	if target is tuple: return tuple(value)
+	if target is list: return list(value)
+	if target is dict: return dict(value)
+	
+	# Leaf casts that need some handling
+	if target is NoneType:
+		if value is None:
+			return value
+		raise TypeError(f"Cannot convert {typename(type(value))} to NoneType")
+	
+	if target is bool:
+		# May be a misunderstanding by the LLM of the format of a bool
+		if isinstance(value, str):
+			return parse_bool(value)
+		
+		# Probably indicates an error in the LLM
+		if isinstance(value, (tuple, list, set, dict)):
+			raise TypeError(f"Cannot convert {type(value).__name__} to bool")
+		
+		# Otherwise, just try to convert it
+		return bool(value)
+	
+	if target is int:
+		if isinstance(value, str):
+			return int(value, 0)
+		# Non-string can't have base 0, already throws on bad types
+		return int(value)
+	
+	# NamedTuple / dataclass
+	
+	if issubclass(target, tuple) and hasattr(target, "_fields"):
+		# Typed
+		if notes := inspect.get_annotations(target):
+			fields = {k: typecast(v, t) for (k, t), v in zip(notes.items(), value)}
+		# Untyped
+		else:
+			fields = dict(zip(target._fields, value))
+		
+		return target(**fields)
+	
+	if dataclasses.is_dataclass(target):
+		fields = {f.name: f.type for f in dataclasses.fields(target)}
+		return target(**{k: typecast(v, fields[k]) for k, v in value.items()})
+	
+	# Generic types
+	
+	origin, args = typing.get_origin(target), typing.get_args(target)
+	
+	if origin == Literal:
+		if value in args:
+			return value
+		raise ValueError(f"{value!r} is not {target}")
+	
+	if origin == Union:
+		for arg in args:
+			try:
+				return typecast(value, arg)
+			except Exception:
+				continue
+		
+		raise TypeError(f"Cannot convert {value!r} to {typename(target)}")
+	
+	if origin == Mapping:
+		if isinstance(value, Mapping):
+			return value
+		raise TypeError(f"Cannot convert {value!r} to {typename(target)}")
+	
+	if origin in Sequence:
+		if isinstance(value, Sequence):
+			return value
+		raise TypeError(f"Cannot convert {value!r} to {typename(target)}")
+	
+	# Recursive conversions for typed collections
+	
+	if origin in {tuple, list, set, frozenset}:
+		return origin(typecast(v, args[0]) for v in value)
+	
+	if origin is dict:
+		# Bug? dict args can be any length
+		if len(args) != 2:
+			return dict(value)
+		kt, vt = args
+		return {typecast(k, kt): typecast(v, vt) for k, v in value.items()}
+	
+	# Last ditch effort
+	return target(value)
+
+def build_signature(origin: Callable) -> str:
+	'''Build a typed function signature for a given function.'''
+	
+	sig = inspect.signature(origin)
+	params = []
+	for name, param in sig.parameters.items():
+		if param.annotation is inspect.Parameter.empty:
+			params.append(name)
+		else:
+			params.append(f"{name}: {typename(param.annotation)}")
+	
+	fndef = f"{origin.__name__ or ''}({', '.join(params)})"
+	if sig.return_annotation is not inspect.Signature.empty:
+		fndef += f" -> {typename(sig.return_annotation)}"
+	
+	return fndef

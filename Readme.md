@@ -35,10 +35,13 @@ Then import like this:
 Auto-GPT style .env is supported by `DefaultKernel` and its singleton `semantic` with the following variables as defaults:
 * `OPENAI_API_KEY` - OpenAI API key (currently required, later optional when other providers are added).
 * `OPENAI_ORGANIZATION` - OpenAI organization ID for identification.
+* `MODEL_PATH` - Path of the model binary to load and save for GPT4All.
+* `ALLOW_DOWNLOAD` - Whether or not to allow GPT4All to download the model (default: true)
 * `MODEL` - Model to use - searches registered Connectors for a model with this name. (default: `gpt-3.5-turbo`)
-* `MODEL_PATH` - Path of the model binary to load for GPT4All.
 * `TEMPERATURE` - Temperature, "how random" it is from 0 to 2. (default: `0`)
 * `TOP_P` - Top-P logit filtering. (default: `0.9`)
+* `TOP_K` - Top-K logit filtering. (default: `0`)
+* `BEST_OF` - Number of completions to generate and return the best of. (default: `1`)
 * `FREQUENCY_PENALTY` - Frequency penalty - penalizes repetition. (default: `0`)
 * `PRESENCE_PENALTY` - Presence penalty - penalizes mentioning more than once. (default: `0`)
 * `MAX_TOKENS` - Maximum number of tokens to return. (default: `1000`)
@@ -51,15 +54,21 @@ Auto-GPT style .env is supported by `DefaultKernel` and its singleton `semantic`
 
 In addition, `Kernel` instantiation and decorating can take either a `config` kw-only argument or kwargs with these names:
 * `api_key`
+* `organization`
+* `model_path`
+* `allow_download`
 * `model`
 * `temperature`
 * `top_p`
+* `best_of`
 * `frequency_penalty`
 * `presence_penalty`
 * `max_tokens`
-* `max_retry`
-* `max_rate`
-* `max_period`
+* `retry`
+* `request_rate`
+* `token_rate`
+* `period`
+* `stop` - A list of strings to stop generation at.
 
 ## Tips
 Getting language models to do what you want is like wrestling a greased pig, and even a framework like servitor can only mitigate this. Here are some tips for getting the best results:
@@ -69,6 +78,7 @@ Getting language models to do what you want is like wrestling a greased pig, and
 * Tuple outputs sound like a good idea, but they probably aren't.
   - There are some special rules in the `TypeAdapter` to handle the LLM outputting tuples instead of lists (since JSON doesn't have tuples), but generally if a function is returning more than one thing, it's too complicated and will confuse it.
 * If it still disobeys, try few-shot prompting. The `TypeAdapter` prompt is carefully crafted to be zero-shot to preserve tokens, but it can be worth adding examples to semantic functions which are called less often.
+* Higher temperatures need lower top_p and top_k to be reliable - temperatures above 1 are prone to producing garbage otherwise.
 
 ## Providers
 Currently servitor supports the following LLM providers:
@@ -98,6 +108,7 @@ Some of these are partially implemented or untested:
 * Tree of Thought adapter
 * Automatic executive function? Break up big tasks into smaller tasks automatically
 * Better error recovery / retry logic
+* Support for `@overload` (essentially multidispatch)
 
 ## How it works
 Servitor has the following components:
@@ -192,7 +203,7 @@ Dumber models can be used for dumber tasks:
 ```
 
 ## Synchrony
-Servitor uses async internally, but the semantic function is properly wrapped to have the same type of synchrony as its definition. To retain async, make its definition async:
+Servitor preserves the async of the function definition. Decorating an async function will use the connector's async interface automatically:
 
 ```python
 >>> @semantic(adapter="cot")
@@ -208,3 +219,7 @@ I've noticed a trend of people using LLMs as semi-personified agents. They're gi
 
 ## What is a "servitor"?
 A "[servitor](https://en.wikipedia.org/wiki/Servitor_(chaos_magic))" is a kind of artificial spirit in [chaos magick](https://en.wikipedia.org/wiki/Chaos_magic). Essentially, you create a miniature proto-consciousness which is given a specific task to perform autonomously. This might be something as simple as reminding you to wake up at a certain time, or as complex as performing a ritual on the "astral plane" on your behalf. Whether or not you believe in all that, the parallels are clear: It's a kind of AI program within your own mind which completes exactly one very specific task given to it in natural language. LLMs are more general than servitors, but restricting their capacities allows them to excel at what they're best at rather than trying to meet a standard they're not yet capable of. It's my opinion that AGI will not be a single monolithic LLM, but rather a cognitive architecture system which uses LLMs as computational units. Think of the cognitive architecture as the [Chinese Room](https://en.wikipedia.org/wiki/Chinese_room) and the LLMs as the person inside. Neither understands Chinese, but the total system does.
+
+## Special mentions
+* [Semantic Kernel](https://github.com/microsoft/semantic-kernel) - Inspired this idea when I tried to use it but got frustrated by what I perceived to be vast overengineering and a lack of composability.
+* [Cataclysm](https://github.com/Mattie/cataclysm) - Uses LLMs to automatically generate Python code from metadata which is then cached. Essentially an inverse of servitor, rather than an LLM which executes a task, it's an LLM which converts a task into something executable.

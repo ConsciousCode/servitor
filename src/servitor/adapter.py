@@ -4,84 +4,40 @@ natural language with programmatic logic, including parsing, error recovery,
 and session maintenance.
 '''
 
-from typing import Protocol, Callable, Generator, NamedTuple, Any, get_origin, get_args, get_type_hints, Union, Literal, Mapping
-import types
+import typing
+from abc import ABC
+from typing import Callable, Generator, NamedTuple, TypeAlias, Any
 import inspect
 import re
 import hjson
 
-from .util import Registry, default, build_task, logger
+from .util import default, build_task, logger, typename, typecast, build_signature
 
-def typename(cls) -> str:
-	'''Convert an annotation into a typename string for the LLM.'''
-	
-	origin = get_origin(cls)
-	if isinstance(cls, types.GenericAlias):
-		return str(cls)
-	elif origin is Union:
-		args = get_args(cls)
-		if types.NoneType in args:
-			rest = [typename(t) for t in args if t is not types.NoneType]
-			base = rest[0] if len(rest) == 1 else f'({"|".join(rest)})'
-			return f"{base}?"
-		return "|".join(typename(t) for t in args)
-	elif origin is Literal:
-		return repr(get_args(cls)[0])
-	elif cls is Any:
-		return "any"
-	elif hints := get_type_hints(cls):
-		fields = []
-		for field, ft in hints.items():
-			fields.append(field if ft is Any else f"{field}: {typename(ft)}")
-		return f"{{{', '.join(fields)}}}"
-	elif isinstance(cls, type):
-		return cls.__name__
-	elif isinstance(cls, str):
-		return cls
-	elif cls is ...:
-		return "..."
-	else:
-		return repr(cls)
-
-def build_signature(origin: Callable):
-	'''Build a typed function signature for a given function.'''
-	
-	sig = inspect.signature(origin)
-	params = []
-	for name, param in sig.parameters.items():
-		if param.annotation is inspect.Parameter.empty:
-			params.append(name)
-		else:
-			params.append(f"{name}: {typename(param.annotation)}")
-	
-	fndef = f"{origin.__name__ or ''}({', '.join(params)})"
-	if sig.return_annotation is not inspect.Signature.empty:
-		fndef += f" -> {typename(sig.return_annotation)}"
-	
-	return fndef
-
-class Adapter(Protocol):
+class Adapter(ABC):
 	'''Adapter protocol. Callable which returns a bidirectional generator returning values.'''
 	
-	registry = Registry()
+	registry = {}
 	
 	def __call__(self, origin: str|Callable, *args, **kwargs) -> Generator[str, str, Any]:
 		'''Build a task, prompt the LLM, parse the response, and fix any mistakes.'''
-		pass
 	
 	@staticmethod
 	def register(name):
+		'''Register an adapter by name.'''
+		
 		def decorator(cls):
 			logger.debug(f"Registering adapter {cls.__name__} as {name!r}")
-			cls.adapter_name = name
-			Adapter.registry.register(name, cls.supports)
+			Adapter.registry[name] = cls
 			return cls
 		return decorator
 	
 	@classmethod
-	def supports(cls, key):
-		if key == cls.adapter_name:
-			return cls()
+	def find(cls, key):
+		'''Find an adapter by name or return the key if it is already an adapter.'''
+		
+		if isinstance(key, str):
+			return cls.registry[key]
+		return key
 
 @Adapter.register("task")
 class TaskAdapter(Adapter):
@@ -115,7 +71,8 @@ class PlainAdapter(Adapter):
 				logger.debug(f"Parsing response: {res}")
 				return self.parse(origin, res)
 			except Exception as e:
-				logger.debug(f"Failed to parse response: {e}.\nResponse: {res}")
+				logger.debug(f"Failed to parse response: {res}")
+				logger.exception(e)
 				res = yield self.fix(task, res, e)
 	
 	def format(self, text, *args, **kwargs):
@@ -160,7 +117,7 @@ class TypeAdapter(PlainAdapter):
 	#  other types don't have any issue.
 	# Possible lead: asking for result in a JSON list even if it's only one item
 	PROMPT = """
-		You are to act as a magic interpreter. Given a function description and arguments, provide the best possible answer as a plaintext JSON literal like `return "value"`.
+		You are to act as a magic interpreter. Given a function description and arguments, provide the best possible answer as a plaintext JSON literal like `return "value"`. Only respond with the answer.
 		{task}
 		return
 	""".strip()
@@ -174,10 +131,15 @@ class TypeAdapter(PlainAdapter):
 			]
 			if len(params):
 				lines.append("args: {")
-				lines.extend(f"\t{k}: {hjson.dumps(v)}" for k, v in params.items()),
+				lines.extend(f"\t{k}: " + hjson.dumps(v, indent='\t') for k, v in params.items()),
 				lines.append("}")
 			return "\n".join(lines)
-		return f"task: {origin}\nargs: {hjson.dumps(args)}\nkwargs: {hjson.dumps(kwargs)}"
+		
+		return '\n'.join([
+			"task: " + "origin",
+			"args: " + hjson.dumps(args, indent='\t'),
+			"kwargs: " + hjson.dumps(kwargs, indent='\t')
+		])
 	
 	def prompt(self, origin, task, args, kwargs):
 		'''Add some extra type hints for the LLM if the return type is simple.'''
@@ -215,14 +177,17 @@ class TypeAdapter(PlainAdapter):
 		#  so we look for parentheses and replace them with brackets
 		if callable(origin):
 			ret = inspect.signature(origin).return_annotation
-			if get_origin(ret) == tuple:
-				res = re.sub(r"\(([^)]*)\)", r"[\1]", res)
+			if typing.get_origin(ret) == tuple:
+				if res.startswith("("):
+					res = "[" + res[1:]
+				if res.endswith(")"):
+					res = res[:-1] + "]"
 		
 		res = hjson.loads(res)
 		if callable(origin):
 			ret = inspect.signature(origin).return_annotation
-			if isinstance(ret, type):
-				return ret(res)
+			if ret is not inspect.Signature.empty:
+				return typecast(res, ret)
 		
 		return res
 
@@ -231,7 +196,7 @@ class ChainOfThought(NamedTuple):
 	thoughts: list[str]
 	answer: Any
 
-@Adapter.register("cot")
+@Adapter.register("chain")
 class ChainOfThoughtAdapter(TypeAdapter):
 	'''
 	Adapter for using Chain of Thought to improve reasoning capabilities.
@@ -263,3 +228,6 @@ class ChainOfThoughtAdapter(TypeAdapter):
 			return ChainOfThought(thoughts, super().parse(origin, m[1]))
 		
 		raise ValueError("No `return(answer)` statement found.")
+
+AdapterProtocol: TypeAlias = Callable[..., Generator[str, str, Any]]
+AdapterRef: TypeAlias = str|Adapter|AdapterProtocol
