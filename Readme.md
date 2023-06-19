@@ -1,4 +1,6 @@
-This project is licensed under the [MIT license](./LICENSE).
+This project is licensed under the [MIT license](LICENSE).
+
+[Internals](src/servitor)
 
 # Servitor
 Easily create "semantic functions" which use LLMs as a black box to execute the given task.
@@ -124,7 +126,7 @@ First, you instantiate a kernel (`semantic` is provided for ease-of-use). Then, 
 More advanced adapters use the type annotations of the function to both prompt and validate the responses of the LLM. The ones provided use HJSON (Human-JSON) which is a generalization of JSON to be more permissive of the LLM's generation, which tend to contain small parsing errors, and it typically uses many fewer tokens.
 
 ### More details
-<img src="./static/flowchart.png" width="300"/>
+<img src="static/flowchart.png" width="300"/>
 
 The adapter is a bidirectional generator which yields prompts, receives responses, and returns a final answer. The implementation of `Adapter` is expected to take care of the vast majority of cases, but this interface is very general to allow for more complex use-cases. The connector is simply an async callable which returns a `Completion` object. This is a thin wrapper around the raw response from the LLM, which can be used as an async iterator for streaming or as an awaitable for blocking. Currently only blocking is actually used.
 
