@@ -1,7 +1,3 @@
-This project is licensed under the [MIT license](LICENSE).
-
-[Internals](src/servitor)
-
 # Servitor
 Easily create "semantic functions" which use LLMs as a black box to execute the given task.
 
@@ -13,6 +9,10 @@ Easily create "semantic functions" which use LLMs as a black box to execute the 
 >>> list_people("John and Mary went to the store.")
 ["John", "Mary"]
 ```
+
+[Internals](src/servitor)
+
+This project is licensed under the [MIT license](LICENSE).
 
 ## Setup
 To install everything the old way:
