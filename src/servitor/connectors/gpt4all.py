@@ -7,6 +7,7 @@ from functools import cached_property
 
 from . import Completion, Connector
 from ..util import logger, async_await
+from ..typings import override
 
 logger.info("Import GPT4All connector")
 
@@ -18,17 +19,21 @@ class GPT4AllCompletion(Completion):
 		self.prompt = prompt
 		self.config = config
 	
+	@override
 	async def __aiter__(self):
 		yield self.sync()
 	
+	@override
 	@async_await
 	async def __await__(self):
-		return self.sync()
+		return self()
 	
+	@override
 	def __iter__(self):
-		yield self.sync()
+		yield self()
 	
-	def sync(self):
+	@override
+	def __call__(self):
 		# streaming refers to streaming to stdout
 		return self.model.generator(self.prompt, streaming=False, **self.config)
 
@@ -54,9 +59,11 @@ class GPT4AllConnector(Connector):
 	def model_list(self):
 		return [normalize_name(name) for name in GPT4All.list_models()]
 	
+	@override
 	def supports(self, config):
 		return normalize_name(config['model']) in self.model_list
 	
+	@override
 	def complete(self, prompt, config):
 		model = config['model']
 		

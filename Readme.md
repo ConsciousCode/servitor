@@ -90,13 +90,12 @@ Currently servitor supports the following LLM providers:
 * GPT4All
 
 Wish list:
-* Anthropic
-* EleutherAI
+* Anthropic (API request made)
 * HuggingFace (model names might conflict with GPT4All?)
 * AI21
 * Cohere
 * GooseAI
-* Bard?
+* Bard (API request made)
 
 ## Feature wish list
 Some of these are partially implemented or untested:

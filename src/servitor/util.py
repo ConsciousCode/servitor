@@ -2,21 +2,21 @@
 Common utilities.
 '''
 
-import typing
-from typing import TypeVar, Optional, Callable, Union, Literal, GenericAlias, Any
-# collections.abc versions are canonical, typing versions are deprecated
-from collections.abc import Mapping, Sequence
-from types import NoneType
 import dataclasses
-from enum import Enum
-import inspect
 import logging
 import os
 from functools import wraps
+import inspect
 
 logger = logging.getLogger("servitor")
 if loglevel := os.getenv("LOG_LEVEL"):
-	logger.setLevel(loglevel.upper())
+	loglevel = loglevel.upper()
+	logger.addHandler(logging.StreamHandler())
+	logger.setLevel(loglevel)
+	logger.info(f"Set log level to {loglevel}")
+
+# Make sure relative imports are after logging
+from .typings import *
 
 T = TypeVar("T")
 def default(x: Optional[T], y: T|Callable[[], T]) -> T:
@@ -77,30 +77,48 @@ def parse_bool(value: Any) -> bool:
 	
 	raise ValueError(f"Cannot convert {value!r} to bool")
 
+def is_TypedDict(cls):
+	return (
+		issubclass(cls, dict) and
+		hasattr(cls, "__required_keys__") and
+		hasattr(cls, "__optional_keys__")
+	)
+
 def typename(cls) -> str:
 	'''Convert an annotation into a typename string for the LLM.'''
 	
 	cls = normalize_type(cls)
 	
-	origin = typing.get_origin(cls)
+	origin, args = typing.get_origin(cls), typing.get_args(cls)
 	if origin is Union:
-		args = typing.get_args(cls)
 		if NoneType in args:
 			rest = [typename(t) for t in args if t is not NoneType]
 			base = rest[0] if len(rest) == 1 else f'({"|".join(rest)})'
 			return f"{base}?"
 		return "|".join(typename(t) for t in args)
 	elif origin is Literal:
-		return "|".join(map(repr, typing.get_args(cls)))
+		return "|".join(map(repr, args))
 	elif cls is Any:
 		return "any"
+	elif cls is str:
+		return "string"
 	elif hints := typing.get_type_hints(cls):
 		fields = []
 		for field, ft in hints.items():
 			fields.append(field if ft is Any else f"{field}: {typename(ft)}")
+		if not cls.__total__:
+			fields.append("...")
 		return f"{{{', '.join(fields)}}}"
 	elif isinstance(cls, GenericAlias):
 		return repr(cls)
+	elif is_TypedDict(cls):
+		fields = []
+		hints = typing.get_type_hints(cls)
+		for hint in hints:
+			c = "?" if hint in cls.__optional_keys__ else ""
+			fields.append(f"{hint}{c}: {typename(hints[hint])}")
+		
+		return f"{cls.__name__}{{{', '.join(fields)}}}"
 	elif isinstance(cls, type):
 		return cls.__name__
 	elif isinstance(cls, str):
@@ -122,18 +140,23 @@ def normalize_type(cls) -> type:
 	
 	if cls in {object, Enum, Union, Any, bool, int, float}: return cls
 	if cls in {None, NoneType}: return NoneType
+	# Sequence types
 	if cls in {str, typing.Text}: return str
 	if cls in {list, typing.List}: return list
 	if cls in {tuple, typing.Tuple}: return tuple
-	if cls in {dict, typing.Dict}: return dict
-	if cls in {set, typing.Set}: return set
+	# Set types
+	if cls in {set, Set, typing.Set, MutableSet, typing.MutableSet}: return set
 	if cls in {frozenset, typing.FrozenSet}: return frozenset
+	# dict is the only builtin mapping type
+	if cls in {dict, typing.Dict, Mapping, typing.Mapping, MutableMapping, typing.MutableMapping}: return dict
 	
-	# typing are deprecated aliases to collections
-	if cls in {Sequence, typing.Sequence}:
+	# Abstract types
+	if cls in {Sequence, typing.Sequence, MutableSequence, typing.MutableSequence}:
 		return Sequence
-	if cls in {Mapping, typing.Mapping}:
-		return Mapping
+	if cls in {Iterable, typing.Iterable}:
+		return Iterable
+	
+	# Generics
 	
 	origin, args = typing.get_origin(cls), typing.get_args(cls)
 	
@@ -225,7 +248,7 @@ def typecast(value: Any, target: str|type|None) -> Any:
 			return value
 		raise TypeError(f"Cannot convert {value!r} to {typename(target)}")
 	
-	if origin in Sequence:
+	if origin == Sequence:
 		if isinstance(value, Sequence):
 			return value
 		raise TypeError(f"Cannot convert {value!r} to {typename(target)}")
@@ -259,5 +282,5 @@ def build_signature(origin: Callable) -> str:
 	fndef = f"{origin.__name__ or ''}({', '.join(params)})"
 	if sig.return_annotation is not inspect.Signature.empty:
 		fndef += f" -> {typename(sig.return_annotation)}"
-	
+	inspect.getsource
 	return fndef

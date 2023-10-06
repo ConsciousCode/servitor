@@ -4,7 +4,7 @@ Public interface for LLM connectors, including the lazy loaders.
 
 from .connector import Completion
 from .connector import Throttle, Completion, Connector
-from . import models
+from ..defaults import models
 
 # Lazy connector loaders - these will be replaced with the actual connector
 #  when their modules are imported.

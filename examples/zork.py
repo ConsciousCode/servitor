@@ -70,6 +70,7 @@ class State:
 
 def main():
 	try:
+		os.makedirs(os.path.dirname(SAVE_FILE), exist_ok=True)
 		with open(SAVE_FILE, "r") as f:
 			state = State(**json.load(f))
 	except (json.JSONDecodeError, ValueError, TypeError, FileNotFoundError):

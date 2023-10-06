@@ -4,22 +4,30 @@ natural language with programmatic logic, including parsing, error recovery,
 and session maintenance.
 '''
 
-import typing
-from abc import ABC
-from typing import Callable, Generator, NamedTuple, TypeAlias, Any
 import inspect
 import re
 import hjson
 
-from .util import default, build_task, logger, typename, typecast, build_signature
+from .util import default, logger, typename, typecast, build_signature, build_task
+from .defaults import RETRY
+from .typings import ABC, typing, override, NamedTuple, TypeAlias, Any, Union, Callable, Generator
 
 class Adapter(ABC):
 	'''Adapter protocol. Callable which returns a bidirectional generator returning values.'''
 	
-	registry = {}
+	registry: dict[str, type['Adapter']] = {}
+
+	def __init__(self, config):
+		super().__init__()
 	
-	def __call__(self, origin: str|Callable, *args, **kwargs) -> Generator[str, str, Any]:
-		'''Build a task, prompt the LLM, parse the response, and fix any mistakes.'''
+	def __call__(self, task: str|Callable, *args, **kwargs) -> Generator[str, str, Any]:
+		'''
+		Prompt the LLM, parse the response, and fix any mistakes. Should be a
+		bidirectional generator:
+		Yield: Prompts for the LLM.
+		Send: Completions from the LLM.
+		Return: Parsed value.
+		'''
 	
 	@staticmethod
 	def register(name):
@@ -32,7 +40,7 @@ class Adapter(ABC):
 		return decorator
 	
 	@classmethod
-	def find(cls, key):
+	def find(cls, key: Union[str, 'Adapter']) -> 'Adapter':
 		'''Find an adapter by name or return the key if it is already an adapter.'''
 		
 		if isinstance(key, str):
@@ -43,10 +51,10 @@ class Adapter(ABC):
 class TaskAdapter(Adapter):
 	'''Do-nothing adapter.'''
 	
+	@override
 	def __call__(self, origin, *args, **kwargs):
-		task = build_task(origin, args, kwargs)
 		logger.debug(f"TaskAdapter(task, *{args!r}, **{kwargs!r})")
-		res = yield task
+		res = yield build_task(origin, args, kwargs)
 		return res
 
 @Adapter.register("plain")
@@ -56,11 +64,13 @@ class PlainAdapter(Adapter):
 	PROMPT = "Q: {task}\nA:"
 	FIX = "{task}{response}\nParsing failed, {error}\nFix all parsing mistakes above:\n"
 	
-	def __init__(self, retry=None):
-		self.retry = default(retry, 3)
+	def __init__(self, config):
+		self.retry = config.get("retry", RETRY)
 	
+	@override
 	def __call__(self, origin, *args, **kwargs):
 		'''Build a task, prompt the LLM, parse the response, and fix any mistakes.'''
+		
 		
 		task = self.task(origin, args, kwargs)
 		prompt = self.prompt(origin, task, args, kwargs)

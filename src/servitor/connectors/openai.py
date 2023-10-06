@@ -11,6 +11,7 @@ from functools import cached_property
 from . import Throttle, Connector
 from .. import defaults
 from ..util import logger, async_await, BusyError, ThrottleError
+from ..typings import override
 
 logger.info("Import OpenAI connector")
 
@@ -27,7 +28,8 @@ def transmute_errors():
 class OpenAICompletion:
 	'''A completion from OpenAI. Handles both text and chat completions.'''
 	
-	def __init__(self, throttle, config):
+	def __init__(self, prompt, throttle, config):
+		self.prompt = prompt
 		self.throttle = throttle
 		self.config = config
 		
@@ -51,9 +53,10 @@ class OpenAICompletion:
 			msgs = [{
 				# Models tend to prefer user instructions over system prompts.
 				"role": "user",
-				"content": config.pop("prompt")
+				"content": prompt
 			}]
 			config['messages'] = msgs
+			del config['prompt']
 			
 			tokens = len(msgs)*per_msg + 3
 			for msg in msgs:
@@ -62,44 +65,75 @@ class OpenAICompletion:
 					if key == "name":
 						tokens += per_name
 		else:
-			tokens = len(enc.encode(config['prompt']))
+			tokens = len(enc.encode(prompt))
 		
 		self.tokens = tokens
 	
-	def completion_type(self):
+	def is_chat_model(self):
+		'''Return whether or not the model is a chat model.'''
 		model = self.config['model']
-		if model.startswith("gpt-3.5") or model.startswith("gpt-4"):
-			return openai.ChatCompletion
-		else:
-			return openai.Completion
+		return model.startswith("gpt-3.5") or model.startswith("gpt-4")
+
+	def completion_type(self):
+		'''Get the openai endpoint for creating a completion.'''
+		return openai.ChatCompletion if self.is_chat_model() else openai.Completion
 	
-	async def __aiter__(self):
+	def build_async_completion(self, stream):
+		'''Call acreate() on the right completion type.'''
+		return self.completion_type().acreate(
+			stream=stream,
+			**self.config
+		)
+	
+	def unpack_content(self, result):
+		'''Unpack the content of a result.'''
+
+		self.throttle.output(result['usage']['completion_tokens'])
+		result = result['choices'][0]
+		if self.is_chat_model():
+			return result['message']['content']
+		else:
+			return result['text']
+	
+	@override
+	async def __iter__(self):
 		with transmute_errors():
-			async with self.throttle.alock(self.tokens):
-				async for item in self.completion_type().aiter(stream=True, **self.config):
+			with self.throttle.lock(self.tokens):
+				for item in self.completion_type().create(stream=True, **self.config):
 					delta = item['choices'][0]['delta']
 					if delta.get("finish_reason"):
 						break
 					self.throttle.output(1)
 					yield delta
 	
+	@override
+	async def __aiter__(self):
+		with transmute_errors():
+			async with self.throttle.alock(self.tokens):
+				async for item in await self.build_async_completion(True):
+					delta = item['choices'][0]['delta']
+					if delta.get("finish_reason"):
+						break
+					self.throttle.output(1)
+					yield delta
+	
+	@override
+	def __call__(self):
+		with transmute_errors():
+			with self.throttle.lock(self.tokens):
+				return self.unpack_content(self.completion_type().create(**self.config))
+	
+	@override
 	@async_await
 	async def __await__(self):
 		with transmute_errors():
 			async with self.throttle.alock(self.tokens):
-				res = await self.completion_type().acreate(**self.config)
-				self.throttle.output(res['usage']['completion_tokens'])
-				return res['choices'][0]['message']['content']
-	
-	def sync(self):
-		with transmute_errors():
-			with self.throttle.lock(self.tokens):
-				res = self.completion_type().create(**self.config)
-				self.throttle.output(res['usage']['completion_tokens'])
-				return res['choices'][0]['message']['content']
+				return self.unpack_content(await self.build_async_completion(False))
 
 @Connector.register("openai")
 class OpenAIConnector(Connector):
+	throttle: dict[int, Throttle]
+
 	def __init__(self):
 		super().__init__()
 		
@@ -109,12 +143,14 @@ class OpenAIConnector(Connector):
 	def model_list(self):
 		return [model['id'] for model in openai.Engine.list()['data']]
 	
+	@override
 	def supports(self, config):
 		return config.get("openai_api_key") or config.get("model") in self.model_list
 	
+	@override
 	def complete(self, prompt, config):
-		# Use id to reduce potential for leaking API keys
-		api_key = id(config['openai_api_key'])
+		# Use hash to reduce potential for leaking API keys
+		api_key = hash(config['openai_api_key'])
 		if api_key not in self.throttle:
 			self.throttle[api_key] = Throttle(
 				config["request_rate"],
@@ -128,10 +164,13 @@ class OpenAIConnector(Connector):
 		
 		# TODO: api_base, api_type_, request_id, api_version
 		# TODO: best_of (my version of OpenAI doesn't support it)
-		return OpenAICompletion(self.throttle[api_key], {
-			# OpenAI is sensitive to too many parameters, so we only pass the ones we need.
-			"prompt": prompt,
+		return OpenAICompletion(
+			prompt,
+			self.throttle[api_key], {
+			# OpenAI is sensitive to unknown parameters, so we only pass the ones we need.
+			"api_key": config.get("openai_api_key"),
 			"model": config.get("model", defaults.openai['model']),
+			"prompt": prompt,
 			"organization": config.get("openai_organization"),
 			"temperature": config["temperature"],
 			"top_p": config["top_p"],
